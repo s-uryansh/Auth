@@ -1,6 +1,7 @@
 {
   "name": "auth",
   "version-string": "1.0.0",
+  "builtin-baseline": "25c149cb2e01df280ffef4f58eb8d0097f4c540d",
   "dependencies": [
     "openssl",
     "gtest"
