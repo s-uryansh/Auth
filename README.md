@@ -157,19 +157,33 @@ Three functions with explicit client/server boundary:
 - Multi-user concurrency
 
 ---
+## Install Prerequisites
+
+### Prerequisites
+- CMake >= 3.20
+- C++17 Compiler
+- Git
+
+### Setup
+Vcpkg [clone] get package manager. Run bootstrap.
+
+  ```bash
+  git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
+  ~/vcpkg/bootstrap-vcpkg.sh
+  export VCPKG_ROOT=~/vcpkg
+  ```
 
 ## Building
 
-**Prerequisites:** CMake ≥ 3.20, vcpkg (`VCPKG_ROOT` set), GCC ≥ 9 / Clang ≥ 10, OpenSSL via vcpkg.
-
 ```bash
+git clone https://github.com/s-uryansh/Auth
+cd Auth
+
 cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake
 cmake --build build
 ```
 
 ---
-
-## Testing
 
 ```bash
 ctest --test-dir build --output-on-failure
