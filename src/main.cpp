@@ -9,7 +9,7 @@
 #include "auth/Registration.hpp"
 
 // In-process mocks for UserDB (device-local) and ServerDB
-std::unordered_map<std::string, std::vector<uint8_t>>      UserDB;
+std::unordered_map<std::string, std::vector<uint8_t>> UserDB;
 std::unordered_map<std::string, auth::RegistrationPayload> ServerDB;
 
 namespace auth {
@@ -21,15 +21,15 @@ std::vector<uint8_t> SecurePasswordInput(std::string& raw) {
 }  // namespace auth
 
 int main() {
-  const std::string username     = "alice";
+  const std::string username = "alice";
   const std::string correct_pass = "correct_horse_battery_staple";
-  const std::string wrong_pass   = "letmein123";
+  const std::string wrong_pass = "letmein123";
 
   // Phase 1: Registration
   try {
-    std::string raw         = correct_pass;
+    std::string raw = correct_pass;
     std::vector<uint8_t> pw = auth::SecurePasswordInput(raw);
-    ServerDB[username]      = auth::RegisterUser(username, pw, UserDB);
+    ServerDB[username] = auth::RegisterUser(username, pw, UserDB);
     std::cout << "[Registration] OK\n";
   } catch (const std::exception& e) {
     std::cerr << "[Registration] FAILED: " << e.what() << '\n';
@@ -38,7 +38,7 @@ int main() {
 
   // Phase 2: Authentication — correct password
   {
-    std::string raw         = correct_pass;
+    std::string raw = correct_pass;
     std::vector<uint8_t> pw = auth::SecurePasswordInput(raw);
     bool ok = auth::AuthenticateUser(username, pw, UserDB[username],
                                      ServerDB[username]);
@@ -47,11 +47,14 @@ int main() {
 
   // Phase 2: Authentication — wrong password
   {
-    std::string raw         = wrong_pass;
+    std::string raw = wrong_pass;
     std::vector<uint8_t> pw = auth::SecurePasswordInput(raw);
     bool ok = auth::AuthenticateUser(username, pw, UserDB[username],
                                      ServerDB[username]);
-    std::cout << "[Auth invalid] " << (!ok ? "PASS (correctly rejected)" : "FAIL (should have rejected)") << '\n';
+    std::cout << "[Auth invalid] "
+              << (!ok ? "PASS (correctly rejected)"
+                      : "FAIL (should have rejected)")
+              << '\n';
   }
 
   return 0;

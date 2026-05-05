@@ -31,13 +31,13 @@ std::vector<uint8_t> DecryptWithServerPrivKey(
 
   // Determine plaintext length
   size_t outlen = 0;
-  if (EVP_PKEY_decrypt(ctx.get(), nullptr, &outlen,
-                       ciphertext.data(), ciphertext.size()) != 1)
+  if (EVP_PKEY_decrypt(ctx.get(), nullptr, &outlen, ciphertext.data(),
+                       ciphertext.size()) != 1)
     throw std::runtime_error("EVP_PKEY_decrypt (size) failed");
 
   std::vector<uint8_t> plaintext(outlen);
-  if (EVP_PKEY_decrypt(ctx.get(), plaintext.data(), &outlen,
-                       ciphertext.data(), ciphertext.size()) != 1)
+  if (EVP_PKEY_decrypt(ctx.get(), plaintext.data(), &outlen, ciphertext.data(),
+                       ciphertext.size()) != 1)
     throw std::runtime_error("EVP_PKEY_decrypt failed");
 
   plaintext.resize(outlen);
@@ -58,7 +58,8 @@ std::vector<uint8_t> ComputeClientHash(const std::vector<uint8_t>& stored_salt,
   unsigned int hash_len = 0;
 
   if (EVP_DigestInit_ex(mdctx.get(), EVP_sha256(), nullptr) != 1 ||
-      EVP_DigestUpdate(mdctx.get(), stored_salt.data(), stored_salt.size()) != 1 ||
+      EVP_DigestUpdate(mdctx.get(), stored_salt.data(), stored_salt.size()) !=
+          1 ||
       EVP_DigestUpdate(mdctx.get(), password.data(), password.size()) != 1 ||
       EVP_DigestFinal_ex(mdctx.get(), hash_c.data(), &hash_len) != 1) {
     OPENSSL_cleanse(password.data(), password.size());
@@ -71,8 +72,7 @@ std::vector<uint8_t> ComputeClientHash(const std::vector<uint8_t>& stored_salt,
 
 // Protocol 2, server side: decrypts E->B and ED->D, recomputes D'=HMAC_B(C),
 // returns D == D'. Username check prevents API misuse.
-bool VerifyOnServer(const std::string& username,
-                    std::vector<uint8_t>& hash_c,
+bool VerifyOnServer(const std::string& username, std::vector<uint8_t>& hash_c,
                     const RegistrationPayload& server_record) {
   const size_t kHashSize = 32;
 
@@ -95,13 +95,12 @@ bool VerifyOnServer(const std::string& username,
 
   bool is_authenticated = false;
 
-  if (HMAC(EVP_sha256(), secret_b.data(), secret_b.size(),
-           hash_c.data(), hash_c.size(),
-           new_verifier_d_prime.data(), &hmac_len) != nullptr) {
+  if (HMAC(EVP_sha256(), secret_b.data(), secret_b.size(), hash_c.data(),
+           hash_c.size(), new_verifier_d_prime.data(), &hmac_len) != nullptr) {
     // Constant-time compare prevents timing attacks
     if (original_verifier_d.size() == new_verifier_d_prime.size() &&
-        CRYPTO_memcmp(original_verifier_d.data(),
-                      new_verifier_d_prime.data(), kHashSize) == 0)
+        CRYPTO_memcmp(original_verifier_d.data(), new_verifier_d_prime.data(),
+                      kHashSize) == 0)
       is_authenticated = true;
   }
 
