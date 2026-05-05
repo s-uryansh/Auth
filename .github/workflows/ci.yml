@@ -1,0 +1,19 @@
+name: Auth CI
+on: [push, pull_request]
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        
+      - name: Configure CMake
+        run: cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake
+        
+      - name: Build
+        run: cmake --build build --config Release
+        
+      - name: Run Tests
+        run: ctest --test-dir build --output-on-failure

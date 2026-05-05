@@ -1,0 +1,18 @@
+# Prerequisites
+vcpkg/
+vcpkg_installed/
+
+# Build directory
+build/
+bin/
+lib/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.patch
+
+# OS files
+.DS_Store
+Thumbs.db
