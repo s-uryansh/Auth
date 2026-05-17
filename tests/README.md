@@ -20,7 +20,7 @@ After all tests, a perf report prints to stdout:
   Auth Protocol Performance Report
 ══════════════════════════════════════════
   Tests passed: 1400 / 1400
-
+  
 ── Registration  (Protocol 1) (n=1374) ──────────────────────────
   avg:     161.6 µs
   min:      89.8 µs
