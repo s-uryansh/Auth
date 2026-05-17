@@ -1,11 +1,14 @@
 /**
- * Comprehensive Auth test suite — 1000 test cases + performance benchmarking.
+ * Comprehensive Auth test suite — 1000+ test cases + performance benchmarking.
  *
- * Protocol refs:
- *   Protocol 1 (Registration): S,B <- RAND; C=H(S,P); D=HMAC_B(C);
- *                               E=Enc(PKs,B); ED=Enc(PKs,D); store S locally
- *   Protocol 2 (Authentication): C=H(S,P); server: B=Dec(SKs,E),
- *                                 D=Dec(SKs,ED), D'=HMAC_B(C); D==D'?
+ * Protocol refs (v2):
+ *   Protocol 1 (Registration): S,B ← RAND; E=Enc(PKs,B⊕R); C=H(S,P);
+ *                               D=HMAC_B(C); ED=Enc(PKs,D); store S locally.
+ *                               R generated internally by RegisterUser (3-arg)
+ *                               or supplied explicitly (4-arg).
+ *   Protocol 2 (Authentication): C=H(S,P); server: B⊕R=Dec(SKs,E),
+ *                                 B=(B⊕R)⊕R, D=Dec(SKs,ED),
+ *                                 D'=HMAC_B(C); D==D'?
  */
 
 #include <gtest/gtest.h>
@@ -53,7 +56,8 @@ static std::vector<uint8_t> RandBytes(size_t n) {
   return v;
 }
 
-// Global perf collector
+// ── Global perf collector ─────────────────────────────────────────────────────
+
 struct PerfCollector {
   std::mutex mu;
   std::vector<double> reg_us;
@@ -71,7 +75,7 @@ struct PerfCollector {
 
 using Clock = std::chrono::high_resolution_clock;
 
-// Timed register
+// Timed register — uses the 3-arg overload (R generated internally).
 static auth::RegistrationPayload TimedRegister(const std::string& user,
                                                std::vector<uint8_t> pw,
                                                DB& db) {
@@ -137,6 +141,11 @@ TEST_P(RegUsernameFixture, UsernameInPayload) {
 }
 
 // 1-51..1-60: salt is always 16 bytes
+INSTANTIATE_TEST_SUITE_P(
+    RegSalt, RegUsernameFixture,
+    ::testing::Values("s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9",
+                      "s10"));
+
 TEST_P(RegUsernameFixture, SaltIs16Bytes) {
   DB db;
   auto pw = Pw("testpassword");
@@ -144,10 +153,6 @@ TEST_P(RegUsernameFixture, SaltIs16Bytes) {
   ASSERT_TRUE(db.count(GetParam()));
   EXPECT_EQ(db.at(GetParam()).size(), 16u);
 }
-INSTANTIATE_TEST_SUITE_P(
-    RegSalt, RegUsernameFixture,
-    ::testing::Values("s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9",
-                      "s10"));
 
 // 1-61..1-70: E field non-empty
 class RegPayloadNonEmpty : public ::testing::TestWithParam<int> {};
@@ -245,7 +250,6 @@ TEST_P(SaltUniqFixture, SameUserReregSaltDiffers) {
 
 class CorrectAuthFixture : public ::testing::TestWithParam<std::string> {};
 
-// 50 varied passwords
 INSTANTIATE_TEST_SUITE_P(
     CorrectAuth, CorrectAuthFixture,
     ::testing::Values(
@@ -253,7 +257,7 @@ INSTANTIATE_TEST_SUITE_P(
         "short", "a", "1", "!",
         "very_long_password_that_exceeds_normal_length_and_keeps_going_on_and_on",
         "with spaces in it", "ALLCAPS", "all_lower",
-        "1234567890", "!@#$%^&*()", "混合_ascii_safe",
+        "1234567890", "!@#$%^&*()", "mixed_ascii_safe",
         "pass\x01\x02\x03", "nullbyte\x00after",
         "newline\nin\npassword", "tab\there",
         "emoji_safe_pass_no_unicode", "trailing_space ",
@@ -363,6 +367,7 @@ TEST_F(AuthFixture, EmptyPasswordFails) {
 
 class EmptyPwFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(EmptyPw, EmptyPwFixture, ::testing::Range(0, 10));
+
 TEST_P(EmptyPwFixture, EmptyPwAlwaysFails) {
   DB db;
   std::string user = "epu_" + std::to_string(GetParam());
@@ -413,7 +418,6 @@ TEST_P(ClientHashFixture, SameSaltPassGivesSameHash) {
 TEST_P(ClientHashFixture, DiffSaltGivesDiffHash) {
   auto salt1 = RandBytes(16);
   auto salt2 = RandBytes(16);
-  // Ensure different salts (overwhelmingly likely)
   if (salt1 == salt2) salt2[0] ^= 0xFF;
   auto pw1 = Pw("same_pass_" + std::to_string(GetParam()));
   auto pw2 = Pw("same_pass_" + std::to_string(GetParam()));
@@ -525,11 +529,9 @@ TEST_P(MultiUserFixture, UserCannotAuthAsOther) {
   auto pl1 = TimedRegister(u1, rp1, db);
   auto pl2 = TimedRegister(u2, rp2, db);
 
-  // u1's password against u2's payload
   auto ap = Pw(p1);
   EXPECT_FALSE(TimedAuth(u2, ap, db[u2], pl2));
 
-  // u2's password against u1's payload
   auto ap2 = Pw(p2);
   EXPECT_FALSE(TimedAuth(u1, ap2, db[u1], pl1));
 }
@@ -573,7 +575,7 @@ TEST_P(CrossPayloadFixture, CorrectHashWrongPayloadFails) {
   auto pl1 = TimedRegister(u1, rp1, db);
   auto pl2 = TimedRegister(u2, rp2, db);
 
-  // Same password but different B/D — u1's hash against u2's payload
+  // Same password but different B/D/R — u1's hash against u2's payload
   auto pw = Pw(pass);
   auto hash = auth::ComputeClientHash(db[u1], pw);
   EXPECT_FALSE(auth::VerifyOnServer(u2, hash, pl2));
@@ -602,7 +604,7 @@ TEST_P(CrossPayloadFixture, SwappedSaltFails) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class PwLengthFixture : public ::testing::TestWithParam<int> {};
-// Lengths: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 (10 per group, 5 groups)
+
 INSTANTIATE_TEST_SUITE_P(PwLen1, PwLengthFixture,
                          ::testing::Values(1, 2, 4, 8, 16, 32, 64, 128, 256,
                                            512));
@@ -621,7 +623,7 @@ TEST_P(PwLengthFixture, LongPasswordCorrectSucceeds) {
 TEST_P(PwLengthFixture, LongPasswordOffByOneFails) {
   DB db;
   int len = GetParam();
-  if (len < 2) return;  // can't shorten 1-byte pass meaningfully
+  if (len < 2) return;
   std::string user = "lpob_" + std::to_string(len);
   std::string pass(len, 'x');
   std::string wrong(len - 1, 'x');
@@ -696,19 +698,25 @@ TEST_P(PwLengthFixture, ExtraRangePasswordRoundTrips) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class ByteValueFixture : public ::testing::TestWithParam<int> {};
-// Test byte values 0x01..0x32 (50 values, skip 0x00 as it's empty string)
+// Test byte values 0x01..0x32 (50 values; 0x00 alone would be empty)
 INSTANTIATE_TEST_SUITE_P(ByteVal, ByteValueFixture, ::testing::Range(1, 51));
 
 TEST_P(ByteValueFixture, SingleByteAllValuesRoundTrip) {
   DB db;
   int bval = GetParam();
   std::string user = "bv_" + std::to_string(bval);
+  // Use 3-arg overload directly (R generated internally)
   std::vector<uint8_t> pass = {static_cast<uint8_t>(bval)};
   std::vector<uint8_t> pass2 = {static_cast<uint8_t>(bval)};
+  auto t0 = Clock::now();
   auto pl = auth::RegisterUser(user, pass, db);
-  g_perf.push_reg(0);  // already timed inline above; push placeholder
-  EXPECT_TRUE(auth::AuthenticateUser(user, pass2, db[user], pl));
-  g_perf.push_auth(0);
+  auto t1 = Clock::now();
+  g_perf.push_reg(std::chrono::duration<double, std::micro>(t1 - t0).count());
+  auto t2 = Clock::now();
+  bool ok = auth::AuthenticateUser(user, pass2, db[user], pl);
+  auto t3 = Clock::now();
+  g_perf.push_auth(std::chrono::duration<double, std::micro>(t3 - t2).count());
+  EXPECT_TRUE(ok);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -794,7 +802,7 @@ INSTANTIATE_TEST_SUITE_P(Concurrent, ConcurrentFixture,
                          ::testing::Range(0, 10));
 
 TEST_P(ConcurrentFixture, ConcurrentRegistrationsNoRace) {
-  // Each thread gets own DB — no shared state
+  // Each thread gets its own DB — no shared mutable state
   int N = 4;
   std::atomic<int> successes{0};
   std::vector<std::thread> threads;
@@ -869,7 +877,7 @@ class CryptoFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(Crypto, CryptoFixture, ::testing::Range(0, 10));
 
 TEST_P(CryptoFixture, EAndEDDistinct) {
-  // E=Enc(PKs,B) and ED=Enc(PKs,D). Different plaintexts → different ciphertexts
+  // E=Enc(PKs,B⊕R) and ED=Enc(PKs,D). Different plaintexts → different ciphertexts.
   DB db;
   std::string user = "cry_" + std::to_string(GetParam());
   auto rp = Pw("crypass_" + std::to_string(GetParam()));
@@ -878,7 +886,7 @@ TEST_P(CryptoFixture, EAndEDDistinct) {
 }
 
 TEST_P(CryptoFixture, TwoRegsProduceDifferentE) {
-  // OAEP is probabilistic — same B produces different E
+  // OAEP is probabilistic; each registration produces a fresh ciphertext.
   DB db1, db2;
   std::string u1 = "de1_" + std::to_string(GetParam());
   std::string u2 = "de2_" + std::to_string(GetParam());
@@ -886,7 +894,6 @@ TEST_P(CryptoFixture, TwoRegsProduceDifferentE) {
   auto rp2 = Pw("same_pass");
   auto pl1 = TimedRegister(u1, rp1, db1);
   auto pl2 = TimedRegister(u2, rp2, db2);
-  // Different B -> almost certainly different E
   EXPECT_NE(pl1.encrypted_secret_e, pl2.encrypted_secret_e);
 }
 
@@ -900,8 +907,8 @@ INSTANTIATE_TEST_SUITE_P(NoThrow, NoThrowFixture, ::testing::Range(0, 15));
 TEST_P(NoThrowFixture, RegistrationNoThrow) {
   DB db;
   auto rp = Pw(RandStr(32));
-  EXPECT_NO_THROW(auth::RegisterUser("nt_" + std::to_string(GetParam()),
-                                     rp, db));
+  EXPECT_NO_THROW(
+      auth::RegisterUser("nt_" + std::to_string(GetParam()), rp, db));
 }
 
 TEST_P(NoThrowFixture, AuthNoThrowWrongPass) {
@@ -1008,7 +1015,7 @@ TEST_P(TamperedSaltFixture, FlippedSaltBitFails) {
   auto rp = Pw(pass);
   auto pl = TimedRegister(user, rp, db);
   auto salt = db[user];
-  salt[i % salt.size()] ^= 0x01;  // flip one bit
+  salt[static_cast<size_t>(i) % salt.size()] ^= 0x01;  // flip one bit
 
   auto ap = Pw(pass);
   EXPECT_FALSE(TimedAuth(user, ap, salt, pl));
@@ -1142,7 +1149,7 @@ TEST_P(MiscFixture, RandomPasswordRoundTrip) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PERF REPORT — runs once at end via environment listener
+// PERF REPORT — runs once at program end via environment listener
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class PerfReportListener : public ::testing::EmptyTestEventListener {
@@ -1155,18 +1162,16 @@ class PerfReportListener : public ::testing::EmptyTestEventListener {
       std::sort(v.begin(), v.end());
       double sum = std::accumulate(v.begin(), v.end(), 0.0);
       double avg = sum / static_cast<double>(v.size());
-      double min = v.front();
-      double max = v.back();
       double p50 = v[v.size() / 2];
       double p95 = v[static_cast<size_t>(v.size() * 0.95)];
       double p99 = v[static_cast<size_t>(v.size() * 0.99)];
       printf("\n── %s (n=%zu) ──────────────────────────\n", name, v.size());
       printf("  avg:  %8.1f µs\n", avg);
-      printf("  min:  %8.1f µs\n", min);
+      printf("  min:  %8.1f µs\n", v.front());
       printf("  p50:  %8.1f µs\n", p50);
       printf("  p95:  %8.1f µs\n", p95);
       printf("  p99:  %8.1f µs\n", p99);
-      printf("  max:  %8.1f µs\n", max);
+      printf("  max:  %8.1f µs\n", v.back());
     };
 
     printf("\n\n══════════════════════════════════════════\n");
@@ -1174,7 +1179,7 @@ class PerfReportListener : public ::testing::EmptyTestEventListener {
     printf("══════════════════════════════════════════\n");
     printf("  Tests passed: %d / %d\n",
            unit.successful_test_count(), unit.total_test_count());
-    stats(p.reg_us, "Registration (Protocol 1)");
+    stats(p.reg_us,  "Registration  (Protocol 1)");
     stats(p.auth_us, "Authentication (Protocol 2)");
     printf("══════════════════════════════════════════\n\n");
 
@@ -1182,10 +1187,12 @@ class PerfReportListener : public ::testing::EmptyTestEventListener {
     std::ofstream csv("/tmp/auth_perf.csv");
     if (csv) {
       csv << "type,latency_us\n";
-      for (auto us : p.reg_us) csv << "registration," << std::fixed
-                                   << std::setprecision(2) << us << "\n";
-      for (auto us : p.auth_us) csv << "authentication," << std::fixed
-                                    << std::setprecision(2) << us << "\n";
+      for (auto us : p.reg_us)
+        csv << "registration," << std::fixed << std::setprecision(2)
+            << us << "\n";
+      for (auto us : p.auth_us)
+        csv << "authentication," << std::fixed << std::setprecision(2)
+            << us << "\n";
     }
   }
 };

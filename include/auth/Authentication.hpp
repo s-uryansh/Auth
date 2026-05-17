@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -8,36 +7,40 @@
 
 namespace auth {
 
-/**
- * @brief CLIENT-SIDE: Hashes password with salt to produce C = H(S, P).
- * @param stored_salt The 128-bit salt retrieved from local UserDB.
- * @param password The raw password (will be securely cleansed from memory).
- * @return Hash C = H(S, P) as a byte vector.
- */
+// Protocol 2 — Authentication, client side.
+//
+// Computes C ← H(S, P) and immediately wipes P.
+//
+// @param stored_salt  Salt S retrieved from the local device DB.
+// @param password     Plaintext password bytes P (wiped on return).
+// @returns            Hash C = H(S, P).
 std::vector<uint8_t> ComputeClientHash(const std::vector<uint8_t>& stored_salt,
                                        std::vector<uint8_t>& password);
 
-/**
- * @brief SERVER-SIDE: Verifies authentication given C and the stored record.
- * Decrypts E->B, ED->D, recomputes D'=HMAC_B(C), compares D==D'.
- * @param username Used to validate server_record.username matches.
- * @param hash_c The client-computed hash C = H(S, P).
- * @param server_record The {U, E, ED} tuple from ServerDB.
- * @return true if D == D', false otherwise.
- */
-bool VerifyOnServer(const std::string& username,
-                    std::vector<uint8_t>& hash_c,
+// Protocol 2 — Authentication, server side.
+//
+// New flow (updated protocol):
+//   1. Decrypt E  → B⊕R  using SKs.
+//   2. Recover B  = (B⊕R) ⊕ R  using the stored server nonce R.
+//   3. Decrypt ED → D    using SKs.
+//   4. Recompute D' = HMAC_B(C).
+//   5. Authenticate iff D == D'  (constant-time compare).
+//   6. Wipe all intermediates.
+//
+// @param username       Username U (guards against API misuse).
+// @param hash_c         Client hash C (wiped on return).
+// @param server_record  RegistrationPayload {U, E, ED, R} from server DB.
+// @returns              true iff authentication succeeds.
+bool VerifyOnServer(const std::string& username, std::vector<uint8_t>& hash_c,
                     const RegistrationPayload& server_record);
 
-/**
- * @brief Full authentication flow (client hash + server verify).
- * Convenience wrapper combining ComputeClientHash and VerifyOnServer.
- * @param username The user's identifier.
- * @param password The raw password (will be securely cleansed from memory).
- * @param stored_salt The 128-bit salt retrieved from local UserDB.
- * @param server_record The {U, E, ED} tuple from ServerDB.
- * @return true if authentication succeeds, false otherwise.
- */
+// Convenience wrapper: ComputeClientHash + VerifyOnServer in one call.
+//
+// @param username       Username U.
+// @param password       Plaintext password bytes P (wiped on return).
+// @param stored_salt    Salt S from device-local DB.
+// @param server_record  RegistrationPayload from server DB.
+// @returns              true iff authentication succeeds.
 bool AuthenticateUser(const std::string& username,
                       std::vector<uint8_t>& password,
                       const std::vector<uint8_t>& stored_salt,

@@ -2,41 +2,57 @@
 
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
+
+#include <memory>
 #include <stdexcept>
 
-#include "auth/crypto_utils.hpp"
+namespace auth {
+namespace internal {
 
-namespace auth::internal {
+// Singleton holder for the server's RSA-OAEP keypair.
+// In a real deployment the private key would never reside on the
+// user device; here both sides share the same process for testing.
+class ServerKeys {
+ public:
+  static ServerKeys& Instance() {
+    static ServerKeys instance;
+    return instance;
+  }
 
-// RSA-2048 keypair. In production these would be loaded from secure storage.
-// GenerateServerKeys() must be called once before Register/Authenticate.
-struct ServerKeys {
-  EvpPkeyPtr keypair;  // holds both public and private key
+  EVP_PKEY* pub() const noexcept { return pkey_.get(); }
+  EVP_PKEY* priv() const noexcept { return pkey_.get(); }
 
-  EVP_PKEY* pub() const { return keypair.get(); }
-  EVP_PKEY* priv() const { return keypair.get(); }
+ private:
+  struct EvpPkeyDeleter {
+    void operator()(EVP_PKEY* k) const noexcept { EVP_PKEY_free(k); }
+  };
+  using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, EvpPkeyDeleter>;
+
+  ServerKeys() {
+    // Generate a 2048-bit RSA key for the demo.
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+    if (!ctx) throw std::runtime_error("EVP_PKEY_CTX_new_id failed");
+    if (EVP_PKEY_keygen_init(ctx) != 1) {
+      EVP_PKEY_CTX_free(ctx);
+      throw std::runtime_error("EVP_PKEY_keygen_init failed");
+    }
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048) != 1) {
+      EVP_PKEY_CTX_free(ctx);
+      throw std::runtime_error("set_rsa_keygen_bits failed");
+    }
+    EVP_PKEY* raw = nullptr;
+    if (EVP_PKEY_keygen(ctx, &raw) != 1) {
+      EVP_PKEY_CTX_free(ctx);
+      throw std::runtime_error("EVP_PKEY_keygen failed");
+    }
+    EVP_PKEY_CTX_free(ctx);
+    pkey_ = EvpPkeyPtr(raw);
+  }
+
+  EvpPkeyPtr pkey_;
 };
 
-inline ServerKeys& GetServerKeys() {
-  static ServerKeys keys = []() {
-    ServerKeys sk;
+inline ServerKeys& GetServerKeys() { return ServerKeys::Instance(); }
 
-    EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr));
-    if (!ctx)
-      throw std::runtime_error("EVP_PKEY_CTX_new_id failed");
-    if (EVP_PKEY_keygen_init(ctx.get()) != 1)
-      throw std::runtime_error("EVP_PKEY_keygen_init failed");
-    if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), 2048) != 1)
-      throw std::runtime_error("EVP_PKEY_CTX_set_rsa_keygen_bits failed");
-
-    EVP_PKEY* raw = nullptr;
-    if (EVP_PKEY_keygen(ctx.get(), &raw) != 1)
-      throw std::runtime_error("EVP_PKEY_keygen failed");
-
-    sk.keypair.reset(raw);
-    return sk;
-  }();
-  return keys;
-}
-
-}  // namespace auth::internal
+}  // namespace internal
+}  // namespace auth
