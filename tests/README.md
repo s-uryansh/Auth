@@ -19,23 +19,23 @@ After all tests, a perf report prints to stdout:
 ══════════════════════════════════════════
   Auth Protocol Performance Report
 ══════════════════════════════════════════
-  Tests passed: 1080 / 1080
+  Tests passed: 1400 / 1400
 
-── Registration (Protocol 1) (n=...) ──────────────────────────
-  avg:     2841.3 µs
-  min:      400.1 µs
-  p50:     2800.0 µs
-  p95:     3200.0 µs
-  p99:     3800.0 µs
-  max:     5000.0 µs
+── Registration (Protocol 1) (n=1374) ──────────────────────────
+  avg:     155.2 µs
+  min:       0.0 µs
+  p50:     121.5 µs
+  p95:     190.5 µs
+  p99:     237.4 µs
+  max:   40759.8 µs
 
-── Authentication (Protocol 2) (n=...) ─────────────────────────
-  avg:     2750.5 µs
-  min:      380.0 µs
-  p50:     2700.0 µs
-  p95:     3100.0 µs
-  p99:     3600.0 µs
-  max:     4900.0 µs
+── Authentication (Protocol 2) (n=1250) ──────────────────────────
+  avg:    1151.8 µs
+  min:       0.0 µs
+  p50:    1149.2 µs
+  p95:    1752.3 µs
+  p99:    1853.9 µs
+  max:    2029.6 µs
 ══════════════════════════════════════════
 ```
 
