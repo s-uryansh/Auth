@@ -223,7 +223,3 @@ ctest --test-dir build --output-on-failure
 ```
 
 ---
-
-## VS Code IntelliSense
-
-Install **CMake Tools** extension, then `Ctrl+Shift+P` → `CMake: Configure`. IntelliSense syncs from the build system via `.vscode/c_cpp_properties.json`. Ensure `VCPKG_ROOT` is set and `vcpkg install` has been run.
