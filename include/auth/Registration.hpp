@@ -7,61 +7,70 @@
 
 namespace auth {
 
-// Payload transmitted from user device to server after registration.
-// Updated Protocol 1: server also stores R (the nonce it generated),
-// which is needed during authentication to recover B from B⊕R.
+// ── RegistrationPayload ───────────────────────────────────────────────────────
+//
+// Payload stored on the server after Protocol 1 (Registration).
+//
+// v2 changes from v1:
+//   • encrypted_secret_e  = HybridEnc(PKs, B⊕R)   [ML-KEM-768 + AES-256-GCM]
+//   • encrypted_verifier_ed = HybridEnc(PKs, D)    [ML-KEM-768 + AES-256-GCM]
+//   • server_nonce_r       = R (16 bytes, stays server-side only)
+//
+// Wire format of each encrypted field:
+//   [ kem_ct (1088 B) | iv (12 B) | gcm_tag (16 B) | aead_ct (N B) ]
 struct RegistrationPayload {
   std::string username;
 
-  // E = Enc(PKs, B⊕R)  — ciphertext of the XOR-masked secret
+  // HybridEnc(PKs, B⊕R) — ML-KEM-768 encapsulated + AES-256-GCM encrypted
   std::vector<uint8_t> encrypted_secret_e;
 
-  // ED = Enc(PKs, D)   — ciphertext of the HMAC verifier
+  // HybridEnc(PKs, D)   — ML-KEM-768 encapsulated + AES-256-GCM encrypted
   std::vector<uint8_t> encrypted_verifier_ed;
 
-  // R — server-generated nonce stored alongside ciphertext.
-  // The server is the only party that ever sees R in plaintext;
-  // it is never sent back to the user.
+  // R — server-generated 128-bit nonce; stored server-side only.
+  // Required by VerifyOnServer to recover B = (B⊕R) ⊕ R.
   std::vector<uint8_t> server_nonce_r;
 };
 
-// Protocol 1 — Registration (4-arg form, explicit server nonce).
+// ── RegisterUser (explicit nonce) ─────────────────────────────────────────────
+//
+// Protocol 1 — Registration with server-supplied nonce R.
 //
 // Flow:
-//   1. User sends U to server.
-//   2. Server replies with R ←$ {0,1}^n  (handled externally; R is passed in).
-//   3. User computes:
-//        E  ← Enc(PKs, B⊕R)
-//        C  ← H(S, P)
-//        D  ← HMAC_B(C)
-//        ED ← Enc(PKs, D)
-//   4. User sends {U, E, ED} to server; deletes B, C, D, E, ED locally.
-//   5. Server stores T_U = {U, R, E, ED}.
-//   6. User device keeps S in local_db.
+//   1. Server generates R ←$ {0,1}^128, sends to user.
+//   2. User: S,B ←$ {0,1}^128
+//            E  = HybridEnc(PKs, B⊕R)
+//            C  = H(S, P)
+//            D  = HMAC_B(C)
+//            ED = HybridEnc(PKs, D)
+//            Wipe B,C,D; store S in local_db; transmit {U,E,ED}.
+//   3. Server stores T_U = {U, R, E, ED}.
 //
-// @param username   Identity string U.
-// @param password   Plaintext password bytes P (wiped on return).
-// @param server_r   Nonce R supplied by the server (exactly 16 bytes).
-// @param local_db   Device-local salt store; keyed by username.
-// @returns          RegistrationPayload containing {U, E, ED, R}.
+// @param username   Identity U.
+// @param password   Plaintext P — zeroed on return.
+// @param server_r   Nonce R from server (must be exactly 16 bytes).
+// @param local_db   Device-local salt store, keyed by username.
+// @returns          RegistrationPayload {U, E, ED, R}.
 auto RegisterUser(
-    const std::string& username, std::vector<uint8_t>& password,
+    const std::string& username,
+    std::vector<uint8_t>& password,
     const std::vector<uint8_t>& server_r,
     std::unordered_map<std::string, std::vector<uint8_t>>& local_db)
     -> RegistrationPayload;
 
-// Protocol 1 — Registration (3-arg convenience overload).
+// ── RegisterUser (self-contained) ────────────────────────────────────────────
 //
-// Identical to the 4-arg form except R is generated internally via CSPRNG.
-// Use in tests and single-process simulations where the caller does not
-// need to observe or supply R directly.
+// Protocol 1 — Registration with internally-generated R.
+// Generates R via CSPRNG and delegates to the explicit-nonce overload.
+// Use in tests and single-process simulations.
 //
-// @param username   Identity string U.
-// @param password   Plaintext password bytes P (wiped on return).
-// @param local_db   Device-local salt store; keyed by username.
-// @returns          RegistrationPayload containing {U, E, ED, R}.
+// @param username   Identity U.
+// @param password   Plaintext P — zeroed on return.
+// @param local_db   Device-local salt store, keyed by username.
+// @returns          RegistrationPayload {U, E, ED, R}.
 auto RegisterUser(
-    const std::string& username, std::vector<uint8_t>& password,
+    const std::string& username,
+    std::vector<uint8_t>& password,
     std::unordered_map<std::string, std::vector<uint8_t>>& local_db)
     -> RegistrationPayload;
 

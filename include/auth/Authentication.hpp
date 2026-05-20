@@ -7,43 +7,52 @@
 
 namespace auth {
 
-// Protocol 2 — Authentication, client side.
+// ── ComputeClientHash ─────────────────────────────────────────────────────────
 //
-// Computes C ← H(S, P) and immediately wipes P.
+// Protocol 2, client side: C ← H(S, P).
+// Password P is wiped immediately after hashing.
 //
-// @param stored_salt  Salt S retrieved from the local device DB.
-// @param password     Plaintext password bytes P (wiped on return).
-// @returns            Hash C = H(S, P).
-std::vector<uint8_t> ComputeClientHash(const std::vector<uint8_t>& stored_salt,
-                                       std::vector<uint8_t>& password);
+// @param stored_salt  Salt S from device-local DB (16 bytes).
+// @param password     Plaintext P — zeroed on return.
+// @returns            32-byte SHA-256 hash C = H(S ‖ P).
+std::vector<uint8_t> ComputeClientHash(
+    const std::vector<uint8_t>& stored_salt,
+    std::vector<uint8_t>& password);
 
-// Protocol 2 — Authentication, server side.
+// ── VerifyOnServer ────────────────────────────────────────────────────────────
 //
-// New flow (updated protocol):
-//   1. Decrypt E  → B⊕R  using SKs.
-//   2. Recover B  = (B⊕R) ⊕ R  using the stored server nonce R.
-//   3. Decrypt ED → D    using SKs.
-//   4. Recompute D' = HMAC_B(C).
-//   5. Authenticate iff D == D'  (constant-time compare).
+// Protocol 2, server side.
+//
+// Steps:
+//   1. B⊕R ← HybridDec(SKs, E)
+//   2. B    = (B⊕R) ⊕ R          (using server_record.server_nonce_r)
+//   3. D    ← HybridDec(SKs, ED)
+//   4. D'   ← HMAC_B(C)
+//   5. Authenticate iff CRYPTO_memcmp(D, D') == 0
 //   6. Wipe all intermediates.
 //
-// @param username       Username U (guards against API misuse).
-// @param hash_c         Client hash C (wiped on return).
+// @param username       Identity U (guards against record mix-up).
+// @param hash_c         Client hash C — zeroed on return.
 // @param server_record  RegistrationPayload {U, E, ED, R} from server DB.
 // @returns              true iff authentication succeeds.
-bool VerifyOnServer(const std::string& username, std::vector<uint8_t>& hash_c,
-                    const RegistrationPayload& server_record);
+bool VerifyOnServer(
+    const std::string& username,
+    std::vector<uint8_t>& hash_c,
+    const RegistrationPayload& server_record);
 
-// Convenience wrapper: ComputeClientHash + VerifyOnServer in one call.
+// ── AuthenticateUser ──────────────────────────────────────────────────────────
 //
-// @param username       Username U.
-// @param password       Plaintext password bytes P (wiped on return).
+// Convenience wrapper: ComputeClientHash → VerifyOnServer.
+//
+// @param username       Identity U.
+// @param password       Plaintext P — zeroed on return.
 // @param stored_salt    Salt S from device-local DB.
 // @param server_record  RegistrationPayload from server DB.
 // @returns              true iff authentication succeeds.
-bool AuthenticateUser(const std::string& username,
-                      std::vector<uint8_t>& password,
-                      const std::vector<uint8_t>& stored_salt,
-                      const RegistrationPayload& server_record);
+bool AuthenticateUser(
+    const std::string& username,
+    std::vector<uint8_t>& password,
+    const std::vector<uint8_t>& stored_salt,
+    const RegistrationPayload& server_record);
 
 }  // namespace auth

@@ -1,6 +1,6 @@
 # Auth: Cryptographic Registration & Authentication Protocol
 
-C++17 implementation of a two-phase password authentication protocol using RSA-OAEP asymmetric encryption and HMAC-based verifiers. Research prototype based on the cryptographic primitives from Kelsey et al. TMPS (NIST/KU Leuven, 2019).
+C++17 implementation of a two-phase password authentication protocol using ML-KEM-768 + AES-256-GCM hybrid encryption (FIPS 203) and HMAC-based verifiers. Research prototype based on the cryptographic primitives from Kelsey et al. TMPS (NIST/KU Leuven, 2019).
 
 ---
 
@@ -17,9 +17,9 @@ C++17 implementation of a two-phase password authentication protocol using RSA-O
 | `R` | 128-bit server-generated nonce (stored server-side only) |
 | `C` | Password hash: `C = H(S, P)` |
 | `D` | HMAC verifier: `D = HMAC_B(C)` |
-| `E` | Encrypted masked secret: `E = Enc(PKs, B⊕R)` |
-| `ED` | Encrypted verifier: `ED = Enc(PKs, D)` |
-| `PKs / SKs` | Server RSA-2048 public/private keypair |
+| `E` | Encrypted masked secret: `E = HybridEnc(PKs, B⊕R)` |
+| `ED` | Encrypted verifier: `ED = HybridEnc(PKs, D)` |
+| `PKs / SKs` | Server ML-KEM-768 public/private keypair |
 
 ---
 
@@ -38,10 +38,10 @@ Generate:
   B  <- RAND_bytes 128-bit secret
 
 Compute:
-  E  <- Enc(PKs, B⊕R)     # RSA-OAEP SHA-256
+  E  <- HybridEnc(PKs, B⊕R)   # ML-KEM-768 + AES-256-GCM (FIPS 203)
   C  <- SHA-256(S || P)
   D  <- HMAC-SHA256_B(C)
-  ED <- Enc(PKs, D)        # RSA-OAEP SHA-256
+  ED <- HybridEnc(PKs, D)      # ML-KEM-768 + AES-256-GCM (FIPS 203)
 
 Store locally:
   UserDB[U] <- S
@@ -70,9 +70,9 @@ Transmit: {U, C} ─────────────────────
                                     Retrieve: {R, E, ED} <- ServerDB[U]
 
                                     Compute:
-                                      B⊕R <- Dec(SKs, E)
+                                      B⊕R <- HybridDec(SKs, E)
                                       B   <- (B⊕R) ⊕ R
-                                      D   <- Dec(SKs, ED)
+                                      D   <- HybridDec(SKs, ED)
                                       D'  <- HMAC-SHA256_B(C)
 
                                     Wipe: B⊕R, B, D, D'  # OPENSSL_cleanse
@@ -90,9 +90,9 @@ Server never receives `P`. Wrong password → wrong `C` → wrong `D'` → no ma
 
 | | V1 | V2 |
 |--|----|----|
-| Encrypted value | `E = Enc(PKs, B)` | `E = Enc(PKs, B⊕R)` |
+| Encrypted value | `E = Enc(PKs, B)` | `E = HybridEnc(PKs, B⊕R)` |
 | Server stores | `{U, E, ED}` | `{U, R, E, ED}` |
-| Auth decryption | `B ← Dec(SKs, E)` | `B⊕R ← Dec(SKs, E)` then `B = (B⊕R) ⊕ R` |
+| Auth decryption | `B ← Dec(SKs, E)` | `B⊕R ← HybridDec(SKs, E)` then `B = (B⊕R) ⊕ R` |
 | Device compromise | B recoverable from E alone | B unrecoverable without R |
 | Offline dict attack | Possible with device+server breach | Requires simultaneous device+server breach |
 
@@ -106,7 +106,8 @@ Server never receives `P`. Wrong password → wrong `C` → wrong `D'` → no ma
 Auth/
 ├── include/auth/
 │   ├── crypto_utils.hpp   # RAII wrappers: EvpMdCtxPtr, EvpPkeyPtr, EvpPkeyCtxPtr
-│   ├── server_keys.hpp    # RSA-2048 keypair singleton (GetServerKeys())
+│   ├── kem_utils.hpp      # ML-KEM-768 hybrid KEM/DEM: MlKemEncrypt(), MlKemDecrypt(), XorBytes()
+│   ├── server_keys.hpp    # ML-KEM-768 keypair singleton (GetServerKeys())
 │   ├── Registration.hpp   # RegisterUser() — 4-arg (explicit R) and 3-arg (R generated internally)
 │   └── Authentication.hpp # ComputeClientHash(), VerifyOnServer(), AuthenticateUser()
 ├── src/
@@ -121,7 +122,7 @@ Auth/
 │   ├── c_cpp_properties.json
 │   └── settings.json
 ├── CMakeLists.txt
-├── vcpkg.json             # Dependencies: openssl, gtest
+├── vcpkg.json             # Dependencies: openssl, liboqs, gtest
 ├── .clang-format
 └── .clang-tidy
 ```
@@ -131,10 +132,19 @@ Auth/
 ## Implementation Details
 
 ### `server_keys.hpp`
-RSA-2048 keypair generated once via `EVP_PKEY_keygen`, stored in a static singleton `GetServerKeys()`. In production, load from HSM or persistent secure storage instead.
+ML-KEM-768 keypair generated once via `liboqs`, stored in a static singleton `GetServerKeys()`. In production, load from HSM or persistent secure storage instead.
+
+### `kem_utils.hpp`
+Implements the hybrid KEM/DEM scheme used for all asymmetric encryption operations:
+
+- **`MlKemEncrypt(plaintext)`** — ML-KEM-768 encapsulation produces a shared secret; AES-256-GCM encrypts the plaintext under that shared secret. Returns the concatenated KEM ciphertext + GCM ciphertext + GCM tag.
+- **`MlKemDecrypt(ciphertext)`** — ML-KEM-768 decapsulation recovers the shared secret; AES-256-GCM decrypts and authenticates the payload.
+- **`XorBytes(a, b, out)`** — constant-length XOR for `B⊕R` masking and recovery.
+
+Conforms to FIPS 203 (ML-KEM) and provides post-quantum security against harvest-now/decrypt-later attacks.
 
 ### `Registration.cpp`
-Protocol 1 (V2): server generates `R` before registration begins; user generates `S`, `B` via `RAND_bytes`; computes `B⊕R`, then `C = SHA-256(S||P)` and `D = HMAC-SHA256_B(C)`; encrypts `B⊕R→E` and `D→ED` via RSA-OAEP SHA-256; stores `S` locally; wipes `P`, `B`, `B⊕R`, `C`, `D` via `OPENSSL_cleanse`. Server stores `{U, R, E, ED}`.
+Protocol 1 (V2): server generates `R` before registration begins; user generates `S`, `B` via `RAND_bytes`; computes `B⊕R`, then `C = SHA-256(S||P)` and `D = HMAC-SHA256_B(C)`; encrypts `B⊕R→E` and `D→ED` via ML-KEM-768 + AES-256-GCM; stores `S` locally; wipes `P`, `B`, `B⊕R`, `C`, `D` via `OPENSSL_cleanse`. Server stores `{U, R, E, ED}`.
 
 Two overloads are provided:
 
@@ -149,7 +159,7 @@ Three functions with explicit client/server boundary:
 | Function | Boundary | What it does |
 |----------|----------|-------------|
 | `ComputeClientHash()` | Client | `C = SHA-256(S\|\|P)`, wipes `P` |
-| `VerifyOnServer()` | Server | Validates username, decrypts `E→B⊕R`, recovers `B=(B⊕R)⊕R`, decrypts `ED→D`, recomputes `D'`, constant-time compare, wipes all intermediates |
+| `VerifyOnServer()` | Server | Validates username, decrypts `E→B⊕R` via `MlKemDecrypt`, recovers `B=(B⊕R)⊕R`, decrypts `ED→D`, recomputes `D'`, constant-time compare, wipes all intermediates |
 | `AuthenticateUser()` | Wrapper | `ComputeClientHash` + `VerifyOnServer` |
 
 ---
@@ -161,7 +171,7 @@ Three functions with explicit client/server boundary:
 | Password never transmitted | Only `C = H(S,P)` crosses wire |
 | Password never stored server-side | Server holds only `{R, E, ED}` |
 | Device compromise does not expose B | B unrecoverable from E without server-held R |
-| Asymmetric encryption | RSA-2048 OAEP SHA-256 (`EVP_PKEY_encrypt/decrypt`) |
+| Post-quantum asymmetric encryption | ML-KEM-768 + AES-256-GCM hybrid (FIPS 203) |
 | Timing-safe comparison | `CRYPTO_memcmp` |
 | Memory wiped after use | `OPENSSL_cleanse` on all intermediates |
 | CSPRNG | `RAND_bytes` for `S`, `B`, and `R` |
@@ -175,7 +185,7 @@ Three functions with explicit client/server boundary:
 **Done**
 - Phase 1 (Registration) + Phase 2 (Authentication) fully implemented — Protocol V2
 - Server nonce R integrated into registration and authentication flows
-- Real RSA-OAEP encryption/decryption (no mock)
+- ML-KEM-768 + AES-256-GCM hybrid encryption (FIPS 203) — replaces RSA-2048 OAEP
 - Client/server boundary split into distinct functions
 - RAII for all OpenSSL contexts
 - Constant-time comparison, secure memory erasure
@@ -234,11 +244,10 @@ The test suite runs 1000+ parameterized cases across 23 sections and prints a pe
 ══════════════════════════════════════════
 ```
 
-A CSV of all latency samples is written to `/tmp/auth_perf.csv` for external analysis.
 
 | Section | What it covers |
 |---------|---------------|
-| Registration structural | Username in payload, salt size, E/ED non-empty, RSA ciphertext size |
+| Registration structural | Username in payload, salt size, E/ED non-empty, KEM ciphertext size |
 | Password wiping | `OPENSSL_cleanse` after registration and authentication |
 | Salt uniqueness | Fresh `RAND_bytes` per registration, same-user re-registration |
 | Correct password succeeds | 50 passwords × round-trip + repeat |
@@ -254,7 +263,7 @@ A CSV of all latency samples is written to `/tmp/auth_perf.csv` for external ana
 | All-byte-value passwords | Single-byte 0x01–0x32 round-trips |
 | Stress — rapid sequential | 5×, 20× correct; wrong-then-correct; alternating |
 | Concurrent registration+auth | 4-thread races, mixed correct/wrong |
-| Crypto properties | E ≠ ED; OAEP probabilistic (two regs → different E) |
+| Crypto properties | E ≠ ED; KEM probabilistic (two regs → different E) |
 | No-throw guarantee | Registration and wrong-password auth never throw |
 | Special character passwords | Control bytes, null-embedded, punctuation |
 | Case sensitivity | 20 correct/wrong case pairs |
@@ -272,7 +281,8 @@ A CSV of all latency samples is written to `/tmp/auth_perf.csv` for external ana
 
 ```text
 [Registration] OK
-  ServerDB stores: {U, R, E=Enc(PKs,B⊕R), ED=Enc(PKs,D)}
+  Enc = ML-KEM-768 + AES-256-GCM (hybrid, FIPS 203)
+  ServerDB stores: {U, R, E=HybridEnc(PKs,B⊕R), ED=HybridEnc(PKs,D)}
   UserDB   stores: {S}
 
 [Auth valid]   PASS
@@ -280,7 +290,3 @@ A CSV of all latency samples is written to `/tmp/auth_perf.csv` for external ana
 ```
 
 ---
-
-## VS Code IntelliSense
-
-Install **CMake Tools** extension, then `Ctrl+Shift+P` → `CMake: Configure`. IntelliSense syncs from the build system via `.vscode/c_cpp_properties.json`. Ensure `VCPKG_ROOT` is set and `vcpkg install` has been run.

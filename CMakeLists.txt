@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Auth VERSION 1.0.0 LANGUAGES CXX)
+project(Auth VERSION 2.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,10 +7,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(STRICT_CXX_FLAGS
   -Wall -Wextra -Werror -pedantic -Wshadow -Wnon-virtual-dtor)
+
 set(SANITIZER_FLAGS
   -fsanitize=address -fno-omit-frame-pointer)
 
+# ── Dependencies ──────────────────────────────────────────────────────────────
 find_package(OpenSSL REQUIRED)
+find_package(liboqs CONFIG REQUIRED)   # ML-KEM-768 (NIST FIPS 203)
 find_package(GTest CONFIG REQUIRED)
 
 # ── Core library ──────────────────────────────────────────────────────────────
@@ -23,7 +26,8 @@ target_include_directories(AuthLib PUBLIC
 
 target_link_libraries(AuthLib PRIVATE
   OpenSSL::SSL
-  OpenSSL::Crypto)
+  OpenSSL::Crypto
+  OQS::oqs)
 
 target_compile_options(AuthLib PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
 target_link_options(AuthLib    PRIVATE ${SANITIZER_FLAGS})
@@ -40,7 +44,7 @@ enable_testing()
 add_executable(AuthTests tests/test_auth.cpp)
 target_link_libraries(AuthTests PRIVATE
   AuthLib
-  GTest::gtest_main)   # gtest_main pulls gtest; no need to list both
+  GTest::gtest_main)
 
 target_compile_options(AuthTests PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
 target_link_options(AuthTests    PRIVATE ${SANITIZER_FLAGS})

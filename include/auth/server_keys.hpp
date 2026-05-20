@@ -1,17 +1,38 @@
 #pragma once
 
-#include <openssl/evp.h>
-#include <openssl/rsa.h>
+#include <oqs/kem.h>
+#include <openssl/crypto.h>
 
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 namespace auth {
 namespace internal {
 
-// Singleton holder for the server's RSA-OAEP keypair.
-// In a real deployment the private key would never reside on the
-// user device; here both sides share the same process for testing.
+// ML-KEM-768 parameter set (NIST FIPS 203, security category 2).
+// All sizes are fixed constants from the standard.
+inline constexpr size_t kMlKem768PkBytes  = 1184;  // public key
+inline constexpr size_t kMlKem768SkBytes  = 2400;  // secret key
+inline constexpr size_t kMlKem768CtBytes  = 1088;  // KEM ciphertext
+inline constexpr size_t kMlKem768SsBytes  = 32;    // shared secret
+
+// ── OQS_KEM RAII wrapper ──────────────────────────────────────────────────────
+
+struct OqsKemDeleter {
+  void operator()(OQS_KEM* k) const noexcept { OQS_KEM_free(k); }
+};
+using OqsKemPtr = std::unique_ptr<OQS_KEM, OqsKemDeleter>;
+
+// ── ServerKeys — singleton holding an ML-KEM-768 keypair ─────────────────────
+//
+// In a real deployment the secret key never leaves the server HSM;
+// here both sides share the same process for protocol simulation.
+//
+// Keys are generated once on first access (Meyers singleton, thread-safe
+// since C++11 guarantees static-local initialization is atomic).
 class ServerKeys {
  public:
   static ServerKeys& Instance() {
@@ -19,37 +40,45 @@ class ServerKeys {
     return instance;
   }
 
-  EVP_PKEY* pub() const noexcept { return pkey_.get(); }
-  EVP_PKEY* priv() const noexcept { return pkey_.get(); }
+  // Raw pointer to public key bytes (kMlKem768PkBytes).
+  const uint8_t* pk() const noexcept { return pk_.data(); }
 
- private:
-  struct EvpPkeyDeleter {
-    void operator()(EVP_PKEY* k) const noexcept { EVP_PKEY_free(k); }
-  };
-  using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, EvpPkeyDeleter>;
+  // Raw pointer to secret key bytes (kMlKem768SkBytes).
+  // Access is intentionally restricted to the server-side decrypt path.
+  const uint8_t* sk() const noexcept { return sk_.data(); }
 
-  ServerKeys() {
-    // Generate a 2048-bit RSA key for the demo.
-    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
-    if (!ctx) throw std::runtime_error("EVP_PKEY_CTX_new_id failed");
-    if (EVP_PKEY_keygen_init(ctx) != 1) {
-      EVP_PKEY_CTX_free(ctx);
-      throw std::runtime_error("EVP_PKEY_keygen_init failed");
-    }
-    if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048) != 1) {
-      EVP_PKEY_CTX_free(ctx);
-      throw std::runtime_error("set_rsa_keygen_bits failed");
-    }
-    EVP_PKEY* raw = nullptr;
-    if (EVP_PKEY_keygen(ctx, &raw) != 1) {
-      EVP_PKEY_CTX_free(ctx);
-      throw std::runtime_error("EVP_PKEY_keygen failed");
-    }
-    EVP_PKEY_CTX_free(ctx);
-    pkey_ = EvpPkeyPtr(raw);
+  // Convenience: a fresh OQS_KEM handle for the ML-KEM-768 algorithm.
+  // Caller owns the returned pointer via OqsKemPtr.
+  static OqsKemPtr NewKem() {
+    OqsKemPtr kem(OQS_KEM_new(OQS_KEM_alg_ml_kem_768));
+    if (!kem)
+      throw std::runtime_error("OQS_KEM_new(ML-KEM-768) failed — "
+                               "liboqs built without ML-KEM support");
+    return kem;
   }
 
-  EvpPkeyPtr pkey_;
+  // Non-copyable, non-movable singleton.
+  ServerKeys(const ServerKeys&)            = delete;
+  ServerKeys& operator=(const ServerKeys&) = delete;
+  ServerKeys(ServerKeys&&)                 = delete;
+  ServerKeys& operator=(ServerKeys&&)      = delete;
+
+  ~ServerKeys() {
+    // Wipe secret key material before deallocation.
+    OPENSSL_cleanse(sk_.data(), sk_.size());
+  }
+
+ private:
+  ServerKeys() {
+    OqsKemPtr kem = NewKem();
+
+    if (OQS_KEM_keypair(kem.get(), pk_.data(), sk_.data()) != OQS_SUCCESS)
+      throw std::runtime_error("OQS_KEM_keypair failed");
+  }
+
+  // Fixed-size arrays avoid heap fragmentation and simplify cleansing.
+  std::array<uint8_t, kMlKem768PkBytes> pk_{};
+  std::array<uint8_t, kMlKem768SkBytes> sk_{};
 };
 
 inline ServerKeys& GetServerKeys() { return ServerKeys::Instance(); }
