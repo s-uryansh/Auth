@@ -234,7 +234,6 @@ The test suite runs 1000+ parameterized cases across 23 sections and prints a pe
 ══════════════════════════════════════════
 ```
 
-A CSV of all latency samples is written to `/tmp/auth_perf.csv` for external analysis.
 
 | Section | What it covers |
 |---------|---------------|
@@ -280,7 +279,3 @@ A CSV of all latency samples is written to `/tmp/auth_perf.csv` for external ana
 ```
 
 ---
-
-## VS Code IntelliSense
-
-Install **CMake Tools** extension, then `Ctrl+Shift+P` → `CMake: Configure`. IntelliSense syncs from the build system via `.vscode/c_cpp_properties.json`. Ensure `VCPKG_ROOT` is set and `vcpkg install` has been run.
