@@ -18,7 +18,7 @@ properties.  All three pass the full 1400-test suite unchanged.
 | **Split-knowledge** | False | False | True |
 | **Post-quantum safe** | False | False | True |
 | **vcpkg deps** | `openssl, gtest` | `openssl, gtest` | `openssl, liboqs, gtest` |
-| **Version string** | 1.0.0 | 1.0.0 | 2.0.0 |
+| **Version string** | 1.0.0 | 2.0.0 | 3.0.0 |
 
 ---
 
