@@ -16,7 +16,7 @@ namespace auth {
 
 namespace {
 
-// Shared registration core.
+// Shared registration core (Protocol 1 — V3: ML-KEM-768 + AES-256-GCM).
 // Precondition: server_r.size() == 16.
 RegistrationPayload RegisterUserImpl(
     const std::string& username,
@@ -26,23 +26,23 @@ RegistrationPayload RegisterUserImpl(
   constexpr size_t kKeySize  = 16;  // 128-bit S and B
   constexpr size_t kHashSize = 32;  // SHA-256 output
 
-  // ── Step 1: S, B ←$ {0,1}^128 ────────────────────────────────────────────
+  // Step 1: S, B ←$ {0,1}^128
   std::vector<uint8_t> salt_s(kKeySize);
   std::vector<uint8_t> secret_b(kKeySize);
   if (RAND_bytes(salt_s.data(), static_cast<int>(kKeySize)) != 1 ||
       RAND_bytes(secret_b.data(), static_cast<int>(kKeySize)) != 1)
     throw std::runtime_error("CSPRNG generation failed");
 
-  // ── Step 2: B⊕R ──────────────────────────────────────────────────────────
+  // Step 2: B⊕R
   std::vector<uint8_t> b_xor_r(kKeySize);
   internal::XorBytes(secret_b, server_r, b_xor_r);
 
-  // ── Step 3: E ← HybridEnc(PKs, B⊕R)  [ML-KEM-768 + AES-256-GCM] ────────
+  // Step 3: E ← HybridEnc(PKs, B⊕R)  [ML-KEM-768 + AES-256-GCM]
   const std::vector<uint8_t> encrypted_e =
       internal::MlKemEncrypt(b_xor_r);
   OPENSSL_cleanse(b_xor_r.data(), b_xor_r.size());
 
-  // ── Step 4: C ← H(S ‖ P) ─────────────────────────────────────────────────
+  // Step 4: C ← H(S ‖ P)
   internal::EvpMdCtxPtr mdctx(EVP_MD_CTX_new());
   if (!mdctx) throw std::runtime_error("EVP_MD_CTX_new failed");
 
@@ -50,28 +50,28 @@ RegistrationPayload RegisterUserImpl(
   unsigned int hash_len = 0;
   if (EVP_DigestInit_ex(mdctx.get(), EVP_sha256(), nullptr) != 1 ||
       EVP_DigestUpdate(mdctx.get(), salt_s.data(),
-                       static_cast<int>(kKeySize)) != 1 ||
+                      static_cast<int>(kKeySize)) != 1 ||
       EVP_DigestUpdate(mdctx.get(), password.data(),
-                       static_cast<int>(password.size())) != 1 ||
+                      static_cast<int>(password.size())) != 1 ||
       EVP_DigestFinal_ex(mdctx.get(), hash_c.data(), &hash_len) != 1)
     throw std::runtime_error("SHA-256 computation failed");
   (void)hash_len;
 
-  // ── Step 5: D ← HMAC_B(C) ────────────────────────────────────────────────
+  // Step 5: D ← HMAC_B(C)
   std::vector<uint8_t> verifier_d(kHashSize);
   unsigned int hmac_len = 0;
   if (HMAC(EVP_sha256(),
-           secret_b.data(), static_cast<int>(secret_b.size()),
-           hash_c.data(),   static_cast<int>(hash_c.size()),
-           verifier_d.data(), &hmac_len) == nullptr)
+          secret_b.data(), static_cast<int>(secret_b.size()),
+          hash_c.data(),   static_cast<int>(hash_c.size()),
+          verifier_d.data(), &hmac_len) == nullptr)
     throw std::runtime_error("HMAC computation failed");
   (void)hmac_len;
 
-  // ── Step 6: ED ← HybridEnc(PKs, D)  [ML-KEM-768 + AES-256-GCM] ─────────
+  // Step 6: ED ← HybridEnc(PKs, D)  [ML-KEM-768 + AES-256-GCM]
   const std::vector<uint8_t> encrypted_ed =
       internal::MlKemEncrypt(verifier_d);
 
-  // ── Step 7: Store S locally; wipe all plaintext intermediates ─────────────
+  // Step 7: Store S locally; wipe all plaintext intermediates
   local_db[username] = salt_s;
 
   OPENSSL_cleanse(password.data(),    password.size());
@@ -84,7 +84,7 @@ RegistrationPayload RegisterUserImpl(
 
 }  // namespace
 
-// ── Public overload 1: explicit server nonce ──────────────────────────────────
+// Public overload 1: explicit server nonce
 auto RegisterUser(
     const std::string& username,
     std::vector<uint8_t>& password,
@@ -96,7 +96,7 @@ auto RegisterUser(
   return RegisterUserImpl(username, password, server_r, local_db);
 }
 
-// ── Public overload 2: internally-generated R ─────────────────────────────────
+// Public overload 2: internally-generated R
 auto RegisterUser(
     const std::string& username,
     std::vector<uint8_t>& password,

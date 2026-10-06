@@ -16,12 +16,12 @@ ctest --test-dir build --output-on-failure -j$(nproc)
 After all tests, a perf report prints to stdout:
 
 ```
-══════════════════════════════════════════
+==============================
   Auth Protocol Performance Report
-══════════════════════════════════════════
+==============================
   Tests passed: 1400 / 1400
   
-── Registration  (Protocol 1) (n=1374) ──────────────────────────
+--- Registration  (Protocol 1) (n=1374) ---
   avg:     161.6 µs
   min:      89.8 µs
   p50:     135.8 µs
@@ -29,14 +29,14 @@ After all tests, a perf report prints to stdout:
   p99:     283.8 µs
   max:   23870.4 µs
 
-── Authentication (Protocol 2) (n=1250) ──────────────────────────
+--- Authentication (Protocol 2) (n=1250) ---
   avg:    1251.7 µs
   min:    1092.7 µs
   p50:    1196.0 µs
   p95:    1808.0 µs
   p99:    1979.9 µs
   max:    2450.0 µs
-══════════════════════════════════════════
+==============================
 ```
 
 Raw CSV written to `/tmp/auth_perf.csv` — columns: `type,latency_us`.

@@ -7,9 +7,7 @@
 
 namespace auth {
 
-// ── ComputeClientHash ─────────────────────────────────────────────────────────
-//
-// Protocol 2, client side: C ← H(S, P).
+// ComputeClientHash — Protocol 2 client side: C ← H(S, P).
 // Password P is wiped immediately after hashing.
 //
 // @param stored_salt  Salt S from device-local DB (16 bytes).
@@ -19,9 +17,7 @@ std::vector<uint8_t> ComputeClientHash(
     const std::vector<uint8_t>& stored_salt,
     std::vector<uint8_t>& password);
 
-// ── VerifyOnServer ────────────────────────────────────────────────────────────
-//
-// Protocol 2, server side.
+// VerifyOnServer — Protocol 2 server side.
 //
 // Steps:
 //   1. B⊕R ← HybridDec(SKs, E)
@@ -40,9 +36,7 @@ bool VerifyOnServer(
     std::vector<uint8_t>& hash_c,
     const RegistrationPayload& server_record);
 
-// ── AuthenticateUser ──────────────────────────────────────────────────────────
-//
-// Convenience wrapper: ComputeClientHash → VerifyOnServer.
+// AuthenticateUser — Convenience wrapper: ComputeClientHash → VerifyOnServer.
 //
 // @param username       Identity U.
 // @param password       Plaintext P — zeroed on return.

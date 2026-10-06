@@ -7,14 +7,11 @@
 
 namespace auth {
 
-// ── RegistrationPayload ───────────────────────────────────────────────────────
-//
-// Payload stored on the server after Protocol 1 (Registration).
-//
-// v2 changes from v1:
-//   • encrypted_secret_e  = HybridEnc(PKs, B⊕R)   [ML-KEM-768 + AES-256-GCM]
-//   • encrypted_verifier_ed = HybridEnc(PKs, D)    [ML-KEM-768 + AES-256-GCM]
-//   • server_nonce_r       = R (16 bytes, stays server-side only)
+// Payload stored on the server after Registration.
+// Fields:
+//   encrypted_secret_e  = HybridEnc(PKs, B⊕R)   [ML-KEM-768 + AES-256-GCM]
+//   encrypted_verifier_ed = HybridEnc(PKs, D)    [ML-KEM-768 + AES-256-GCM]
+//   server_nonce_r       = R (16 bytes, server-side only)
 //
 // Wire format of each encrypted field:
 //   [ kem_ct (1088 B) | iv (12 B) | gcm_tag (16 B) | aead_ct (N B) ]
@@ -32,12 +29,9 @@ struct RegistrationPayload {
   std::vector<uint8_t> server_nonce_r;
 };
 
-// ── RegisterUser (explicit nonce) ─────────────────────────────────────────────
-//
-// Protocol 1 — Registration with server-supplied nonce R.
-//
+// RegisterUser — Registration with server-supplied nonce R.
 // Flow:
-//   1. Server generates R ←$ {0,1}^128, sends to user.
+//   1. Server generates R, sends to user.
 //   2. User: S,B ←$ {0,1}^128
 //            E  = HybridEnc(PKs, B⊕R)
 //            C  = H(S, P)
@@ -58,9 +52,7 @@ auto RegisterUser(
     std::unordered_map<std::string, std::vector<uint8_t>>& local_db)
     -> RegistrationPayload;
 
-// ── RegisterUser (self-contained) ────────────────────────────────────────────
-//
-// Protocol 1 — Registration with internally-generated R.
+// RegisterUser — Registration with internally-generated R.
 // Generates R via CSPRNG and delegates to the explicit-nonce overload.
 // Use in tests and single-process simulations.
 //

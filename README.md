@@ -27,7 +27,7 @@ C++17 implementation of a two-phase password authentication protocol using ML-KE
 
 ```text
 User Device                                         Server
-───────────────────────────────────────────────────────────
+----------------------------------------------------------
 Input: U                  ── U ─────────────────────────>
 
                                     Generate:
@@ -55,7 +55,7 @@ Transmit: {U, E, ED} ───────────────────�
 
 ```text
 User Device                                         Server
-───────────────────────────────────────────────────────────
+----------------------------------------------------------
 Input: U, P
 
 Retrieve: S <- UserDB[U]
@@ -236,12 +236,12 @@ ctest --test-dir build --output-on-failure
 The test suite runs 1000+ parameterized cases across 23 sections and prints a performance report on completion:
 
 ```text
-══════════════════════════════════════════
+==============================
   Auth Protocol Performance Report
-══════════════════════════════════════════
-── Registration  (Protocol 1) ──────────
-── Authentication (Protocol 2) ─────────
-══════════════════════════════════════════
+==============================
+--- Registration  (Protocol 1) ---
+--- Authentication (Protocol 2) ---
+==============================
 ```
 
 

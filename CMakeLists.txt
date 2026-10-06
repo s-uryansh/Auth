@@ -11,12 +11,12 @@ set(STRICT_CXX_FLAGS
 set(SANITIZER_FLAGS
   -fsanitize=address -fno-omit-frame-pointer)
 
-# ── Dependencies ──────────────────────────────────────────────────────────────
+# Dependencies
 find_package(OpenSSL REQUIRED)
 find_package(liboqs CONFIG REQUIRED)   # ML-KEM-768 (NIST FIPS 203)
 find_package(GTest CONFIG REQUIRED)
 
-# ── Core library ──────────────────────────────────────────────────────────────
+# Core library
 add_library(AuthLib
   src/Registration.cpp
   src/Authentication.cpp)
@@ -32,13 +32,13 @@ target_link_libraries(AuthLib PRIVATE
 target_compile_options(AuthLib PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
 target_link_options(AuthLib    PRIVATE ${SANITIZER_FLAGS})
 
-# ── Demo executable ───────────────────────────────────────────────────────────
+# Demo executable
 add_executable(AuthApp src/main.cpp)
 target_link_libraries(AuthApp PRIVATE AuthLib)
 target_compile_options(AuthApp PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
 target_link_options(AuthApp    PRIVATE ${SANITIZER_FLAGS})
 
-# ── Tests — enable_testing() MUST come before add_executable for ctest ────────
+# Tests
 enable_testing()
 
 add_executable(AuthTests tests/test_auth.cpp)

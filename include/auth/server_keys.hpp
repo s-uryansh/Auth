@@ -19,14 +19,13 @@ inline constexpr size_t kMlKem768SkBytes  = 2400;  // secret key
 inline constexpr size_t kMlKem768CtBytes  = 1088;  // KEM ciphertext
 inline constexpr size_t kMlKem768SsBytes  = 32;    // shared secret
 
-// ── OQS_KEM RAII wrapper ──────────────────────────────────────────────────────
-
+// OQS_KEM RAII wrapper
 struct OqsKemDeleter {
   void operator()(OQS_KEM* k) const noexcept { OQS_KEM_free(k); }
 };
 using OqsKemPtr = std::unique_ptr<OQS_KEM, OqsKemDeleter>;
 
-// ── ServerKeys — singleton holding an ML-KEM-768 keypair ─────────────────────
+// ServerKeys — singleton holding an ML-KEM-768 keypair
 //
 // In a real deployment the secret key never leaves the server HSM;
 // here both sides share the same process for protocol simulation.

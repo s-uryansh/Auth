@@ -1,6 +1,6 @@
-// ── Hybrid ML-KEM-768 + AES-256-GCM encrypt/decrypt utilities ────────────────
+// Hybrid ML-KEM-768 + AES-256-GCM encrypt/decrypt utilities
 //
-// Replaces RSA-OAEP throughout the protocol.  Each "Enc(PKs, plaintext)" call
+// Replaces RSA-OAEP throughout the protocol. Each "Enc(PKs, plaintext)" call
 // uses a fresh ML-KEM encapsulation so the symmetric key is never reused.
 //
 // Wire format produced by MlKemEncrypt:
@@ -35,15 +35,12 @@ inline constexpr size_t kTagBytes = 16;  // AES-GCM authentication tag
 inline constexpr size_t kEncryptOverhead =
     kMlKem768CtBytes + kIvBytes + kTagBytes;
 
-// ── MlKemEncrypt ─────────────────────────────────────────────────────────────
-//
-// Hybrid-encrypt |plaintext| under the server's ML-KEM-768 public key.
+// MlKemEncrypt — Hybrid-encrypt |plaintext| under the server's ML-KEM-768 public key.
 // Returns the wire-format ciphertext blob.
-//
 // Thread-safe: uses only stack/local state after reading the singleton pk.
 inline std::vector<uint8_t> MlKemEncrypt(
     const std::vector<uint8_t>& plaintext) {
-  // ── 1. ML-KEM encapsulation ───────────────────────────────────────────────
+  // 1. ML-KEM encapsulation
   OqsKemPtr kem = ServerKeys::NewKem();
 
   std::vector<uint8_t> kem_ct(kMlKem768CtBytes);
@@ -58,14 +55,14 @@ inline std::vector<uint8_t> MlKemEncrypt(
     throw std::runtime_error("OQS_KEM_encaps failed");
   }
 
-  // ── 2. Generate random IV ─────────────────────────────────────────────────
+  // 2. Generate random IV
   std::vector<uint8_t> iv(kIvBytes);
   if (RAND_bytes(iv.data(), static_cast<int>(iv.size())) != 1) {
     OPENSSL_cleanse(ss.data(), ss.size());
     throw std::runtime_error("RAND_bytes failed generating IV");
   }
 
-  // ── 3. AES-256-GCM encrypt ───────────────────────────────────────────────
+  // 3. AES-256-GCM encrypt
   EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new());
   if (!ctx) {
     OPENSSL_cleanse(ss.data(), ss.size());
@@ -114,7 +111,7 @@ inline std::vector<uint8_t> MlKemEncrypt(
                            tag.data()) != 1)
     throw std::runtime_error("EVP_CIPHER_CTX_ctrl GET_TAG failed");
 
-  // ── 4. Assemble wire format: kem_ct || iv || tag || aead_ct ──────────────
+  // 4. Assemble wire format: kem_ct || iv || tag || aead_ct
   std::vector<uint8_t> result;
   result.reserve(kEncryptOverhead + aead_ct.size());
   result.insert(result.end(), kem_ct.begin(), kem_ct.end());
@@ -125,16 +122,13 @@ inline std::vector<uint8_t> MlKemEncrypt(
   return result;
 }
 
-// ── MlKemDecrypt ─────────────────────────────────────────────────────────────
-//
-// Decrypts a blob produced by MlKemEncrypt using the server's ML-KEM-768
-// secret key.  Throws std::runtime_error on any integrity failure.
-//
+// MlKemDecrypt — Decrypts a blob produced by MlKemEncrypt using the server's
+// ML-KEM-768 secret key. Throws std::runtime_error on any integrity failure.
 // Constant-time: AES-GCM tag verification is handled by OpenSSL; the
 // ML-KEM decapsulation is constant-time in liboqs.
 inline std::vector<uint8_t> MlKemDecrypt(
     const std::vector<uint8_t>& blob) {
-  // ── 1. Parse wire format ──────────────────────────────────────────────────
+  // 1. Parse wire format
   if (blob.size() < kEncryptOverhead)
     throw std::runtime_error("MlKemDecrypt: blob too short");
 
@@ -156,7 +150,7 @@ inline std::vector<uint8_t> MlKemDecrypt(
   const size_t aead_len = blob.size() - kEncryptOverhead;
   const uint8_t* aead_ptr = ptr;
 
-  // ── 2. ML-KEM decapsulation → shared secret ───────────────────────────────
+  // 2. ML-KEM decapsulation → shared secret
   OqsKemPtr kem = ServerKeys::NewKem();
 
   std::vector<uint8_t> ss(kMlKem768SsBytes);
@@ -168,7 +162,7 @@ inline std::vector<uint8_t> MlKemDecrypt(
     throw std::runtime_error("OQS_KEM_decaps failed");
   }
 
-  // ── 3. AES-256-GCM decrypt + verify tag ──────────────────────────────────
+  // 3. AES-256-GCM decrypt + verify tag
   EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new());
   if (!ctx) {
     OPENSSL_cleanse(ss.data(), ss.size());

@@ -16,3 +16,5 @@ lib/
 # OS files
 .DS_Store
 Thumbs.db
+
+TMPS_Auth.pdf

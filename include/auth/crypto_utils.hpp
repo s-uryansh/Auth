@@ -9,7 +9,7 @@
 namespace auth {
 namespace internal {
 
-// ── OpenSSL RAII wrappers ─────────────────────────────────────────────────────
+// OpenSSL RAII wrappers
 
 struct EvpMdCtxDeleter {
   void operator()(EVP_MD_CTX* ctx) const noexcept { EVP_MD_CTX_free(ctx); }
@@ -31,7 +31,7 @@ using EvpMdCtxPtr     = std::unique_ptr<EVP_MD_CTX,     EvpMdCtxDeleter>;
 using EvpCipherCtxPtr = std::unique_ptr<EVP_CIPHER_CTX, EvpCipherCtxDeleter>;
 using EvpPkeyCtxPtr   = std::unique_ptr<EVP_PKEY_CTX,   EvpPkeyCtxDeleter>;
 
-// ── Byte utilities ────────────────────────────────────────────────────────────
+// Byte utilities
 
 // XOR two equal-length byte vectors; result written into |out|.
 // Precondition: a.size() == b.size() == out.size().

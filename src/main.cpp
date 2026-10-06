@@ -1,7 +1,9 @@
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
 
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -9,28 +11,33 @@
 #include "auth/Authentication.hpp"
 #include "auth/Registration.hpp"
 
-// ── In-process mocks ─────────────────────────────────────────────────────────
-// UserDB  : device-local — maps username → salt S
-// ServerDB: server-side  — maps username → RegistrationPayload
-//           payload = {U, R, E=HybridEnc(PKs,B⊕R), ED=HybridEnc(PKs,D)}
 std::unordered_map<std::string, std::vector<uint8_t>> UserDB;
 std::unordered_map<std::string, auth::RegistrationPayload> ServerDB;
 
 namespace auth {
 
-// Zero-copy password intake: moves bytes out of raw string, then wipes it.
 std::vector<uint8_t> SecurePasswordInput(std::string& raw) {
   std::vector<uint8_t> v(raw.begin(), raw.end());
   OPENSSL_cleanse(&raw[0], raw.size());
   return v;
 }
 
-// Server-side nonce generation: R ←$ {0,1}^128.
 std::vector<uint8_t> ServerGenerateNonce(size_t bytes = 16) {
   std::vector<uint8_t> r(bytes);
   if (RAND_bytes(r.data(), static_cast<int>(r.size())) != 1)
     throw std::runtime_error("CSPRNG failed generating server nonce R");
   return r;
+}
+
+std::string ToHex(const std::vector<uint8_t>& data, size_t max_len = 16) {
+  std::ostringstream oss;
+  size_t limit = std::min(data.size(), max_len);
+  for (size_t i = 0; i < limit; ++i) {
+    oss << std::hex << std::setw(2) << std::setfill('0')
+        << static_cast<int>(data[i]);
+  }
+  if (data.size() > max_len) oss << "...";
+  return oss.str();
 }
 
 }  // namespace auth
@@ -40,45 +47,32 @@ int main() {
   const std::string correct_pass = "correct_horse_battery_staple";
   const std::string wrong_pass   = "letmein123";
 
-  // ── Phase 1: Registration (Protocol 1, v2) ────────────────────────────────
-  // Enc = ML-KEM-768 encapsulation + AES-256-GCM (hybrid KEM/DEM)
-  try {
-    std::vector<uint8_t> server_r = auth::ServerGenerateNonce();
-    std::string raw = correct_pass;
-    std::vector<uint8_t> pw = auth::SecurePasswordInput(raw);
+  // Phase 1: Registration
+  std::vector<uint8_t> server_r = auth::ServerGenerateNonce();
+  std::string raw_pass = correct_pass;
+  std::vector<uint8_t> password = auth::SecurePasswordInput(raw_pass);
+  ServerDB[username] = auth::RegisterUser(username, password, server_r, UserDB);
 
-    ServerDB[username] = auth::RegisterUser(username, pw, server_r, UserDB);
+  const auto& salt = UserDB[username];
+  const auto& payload = ServerDB[username];
 
-    std::cout << "[Registration] OK\n";
-    std::cout << "  Enc = ML-KEM-768 + AES-256-GCM (hybrid, FIPS 203)\n";
-    std::cout << "  ServerDB: {U, R, E=HybridEnc(B\xe2\x8a\x95R), "
-                 "ED=HybridEnc(D)}\n";
-    std::cout << "  UserDB:   {S}\n\n";
-  } catch (const std::exception& e) {
-    std::cerr << "[Registration] FAILED: " << e.what() << '\n';
-    return 1;
-  }
+  std::cout << "Registration: " << username << "\n";
+  std::cout << "  UserDB  S = " << auth::ToHex(salt, 32) << "\n";
+  std::cout << "  ServerDB R = " << auth::ToHex(payload.server_nonce_r, 32) << "\n";
+  std::cout << "  ServerDB E = HybridEnc(B xor R) [" << payload.encrypted_secret_e.size() << " bytes]\n";
+  std::cout << "  ServerDB ED = HybridEnc(D) [" << payload.encrypted_verifier_ed.size() << " bytes]\n\n";
 
-  // ── Phase 2a: Authentication — correct password ───────────────────────────
-  {
-    std::string raw = correct_pass;
-    std::vector<uint8_t> pw = auth::SecurePasswordInput(raw);
-    bool ok = auth::AuthenticateUser(
-        username, pw, UserDB[username], ServerDB[username]);
-    std::cout << "[Auth valid]   " << (ok ? "PASS" : "FAIL") << '\n';
-  }
+  // Phase 2a: Correct password
+  raw_pass = correct_pass;
+  password = auth::SecurePasswordInput(raw_pass);
+  bool ok = auth::AuthenticateUser(username, password, UserDB[username], ServerDB[username]);
+  std::cout << "Auth (correct): " << (ok ? "AUTHENTICATED" : "REJECTED") << "\n";
 
-  // ── Phase 2b: Authentication — wrong password ─────────────────────────────
-  {
-    std::string raw = wrong_pass;
-    std::vector<uint8_t> pw = auth::SecurePasswordInput(raw);
-    bool ok = auth::AuthenticateUser(
-        username, pw, UserDB[username], ServerDB[username]);
-    std::cout << "[Auth invalid] "
-              << (!ok ? "PASS (correctly rejected)"
-                      : "FAIL (should have rejected)")
-              << '\n';
-  }
+  // Phase 2b: Wrong password
+  raw_pass = wrong_pass;
+  password = auth::SecurePasswordInput(raw_pass);
+  ok = auth::AuthenticateUser(username, password, UserDB[username], ServerDB[username]);
+  std::cout << "Auth (wrong):   " << (ok ? "AUTHENTICATED (ERROR)" : "REJECTED") << "\n";
 
   return 0;
 }

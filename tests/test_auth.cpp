@@ -32,7 +32,7 @@
 #include "auth/Authentication.hpp"
 #include "auth/Registration.hpp"
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Helpers
 
 using DB = std::unordered_map<std::string, std::vector<uint8_t>>;
 
@@ -56,7 +56,7 @@ static std::vector<uint8_t> RandBytes(size_t n) {
   return v;
 }
 
-// ── Global perf collector ─────────────────────────────────────────────────────
+// Global perf collector
 
 struct PerfCollector {
   std::mutex mu;
@@ -77,8 +77,8 @@ using Clock = std::chrono::high_resolution_clock;
 
 // Timed register — uses the 3-arg overload (R generated internally).
 static auth::RegistrationPayload TimedRegister(const std::string& user,
-                                               std::vector<uint8_t> pw,
-                                               DB& db) {
+                                              std::vector<uint8_t> pw,
+                                              DB& db) {
   auto t0 = Clock::now();
   auto p = auth::RegisterUser(user, pw, db);
   auto t1 = Clock::now();
@@ -99,7 +99,7 @@ static bool TimedAuth(const std::string& user, std::vector<uint8_t> pw,
   return ok;
 }
 
-// ── Fixture ───────────────────────────────────────────────────────────────────
+// Fixture
 
 class AuthFixture : public ::testing::Test {
  protected:
@@ -113,9 +113,9 @@ class AuthFixture : public ::testing::Test {
   }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 1: Registration structural tests (100 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 // 1-1..1-50: username stored correctly for 50 different names
 class RegUsernameFixture : public ::testing::TestWithParam<std::string> {};
@@ -157,7 +157,7 @@ TEST_P(RegUsernameFixture, SaltIs16Bytes) {
 // 1-61..1-70: E field non-empty
 class RegPayloadNonEmpty : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(RegE, RegPayloadNonEmpty,
-                         ::testing::Range(0, 10));
+                        ::testing::Range(0, 10));
 TEST_P(RegPayloadNonEmpty, EncryptedSecretNonEmpty) {
   DB db;
   auto pw = Pw("pw" + std::to_string(GetParam()));
@@ -189,9 +189,9 @@ TEST_P(RegPayloadNonEmpty, EncryptedVerifierSizeRSA2048) {
   EXPECT_GE(p.encrypted_verifier_ed.size(), 256u);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 2: Password wiping tests (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class WipeFixture : public ::testing::TestWithParam<std::string> {};
 
@@ -215,9 +215,9 @@ TEST_P(WipeFixture, PasswordWipedAfterRegistration) {
   for (auto b : pw) EXPECT_EQ(b, 0x00);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 3: Salt uniqueness (50 tests — 25 pairs)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class SaltUniqFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(SaltUniq, SaltUniqFixture,
@@ -244,9 +244,9 @@ TEST_P(SaltUniqFixture, SameUserReregSaltDiffers) {
             db2["rereg_" + std::to_string(i)]);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 4: Correct password succeeds (100 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class CorrectAuthFixture : public ::testing::TestWithParam<std::string> {};
 
@@ -289,9 +289,9 @@ TEST_P(CorrectAuthFixture, AuthSucceedsRepeat3x) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 5: Wrong password fails (100 tests — 50 pairs)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 using PassPair = std::pair<std::string, std::string>;
 
@@ -356,9 +356,9 @@ TEST_P(WrongPassFixture, WrongPassDoesNotLeakCorrect) {
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 6: Empty / boundary passwords (30 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 TEST_F(AuthFixture, EmptyPasswordFails) {
   std::vector<uint8_t> pw;
@@ -398,9 +398,9 @@ TEST_P(EmptyPwFixture, SingleBytePasswordWrong) {
   EXPECT_FALSE(TimedAuth(user, auth_pw, db[user], payload));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 7: Client hash determinism (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class ClientHashFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(ClientHash, ClientHashFixture,
@@ -426,9 +426,9 @@ TEST_P(ClientHashFixture, DiffSaltGivesDiffHash) {
   EXPECT_NE(h1, h2);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 8: Hash differs for different passwords (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class ClientHashDiffFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(ClientHashDiff, ClientHashDiffFixture,
@@ -450,9 +450,9 @@ TEST_P(ClientHashDiffFixture, HashIs32Bytes) {
   EXPECT_EQ(h.size(), 32u);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 9: Server-side username validation (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class ServerRejectFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(ServerReject, ServerRejectFixture,
@@ -480,9 +480,9 @@ TEST_P(ServerRejectFixture, CorrectUsernameAccepted) {
   EXPECT_TRUE(auth::VerifyOnServer(user, hash, payload));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 10: Password wipe after auth (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class WipeAuthFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(WipeAuth, WipeAuthFixture, ::testing::Range(0, 25));
@@ -509,9 +509,9 @@ TEST_P(WipeAuthFixture, PwWipedAfterFailedAuth) {
   for (auto b : auth_pw) EXPECT_EQ(b, 0x00);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 11: Multi-user isolation (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class MultiUserFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(MultiUser, MultiUserFixture, ::testing::Range(0, 25));
@@ -555,13 +555,13 @@ TEST_P(MultiUserFixture, BothUsersAuthIndependently) {
   EXPECT_TRUE(TimedAuth(u2, ap2, db[u2], pl2));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 12: Cross-payload attacks (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class CrossPayloadFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(CrossPayload, CrossPayloadFixture,
-                         ::testing::Range(0, 25));
+                        ::testing::Range(0, 25));
 
 TEST_P(CrossPayloadFixture, CorrectHashWrongPayloadFails) {
   DB db;
@@ -599,15 +599,14 @@ TEST_P(CrossPayloadFixture, SwappedSaltFails) {
   EXPECT_FALSE(auth::VerifyOnServer(u1, hash, pl1));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 13: Password length spectrum (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class PwLengthFixture : public ::testing::TestWithParam<int> {};
 
 INSTANTIATE_TEST_SUITE_P(PwLen1, PwLengthFixture,
-                         ::testing::Values(1, 2, 4, 8, 16, 32, 64, 128, 256,
-                                           512));
+                        ::testing::Values(1, 2, 4, 8, 16, 32, 64, 128, 256, 512));
 
 TEST_P(PwLengthFixture, LongPasswordCorrectSucceeds) {
   DB db;
@@ -634,8 +633,7 @@ TEST_P(PwLengthFixture, LongPasswordOffByOneFails) {
 }
 
 INSTANTIATE_TEST_SUITE_P(PwLen2, PwLengthFixture,
-                         ::testing::Values(3, 5, 7, 15, 17, 31, 33, 63, 65,
-                                           127));
+                        ::testing::Values(3, 5, 7, 15, 17, 31, 33, 63, 65, 127));
 
 TEST_P(PwLengthFixture, OddLengthPasswordRoundTrips) {
   DB db;
@@ -649,8 +647,7 @@ TEST_P(PwLengthFixture, OddLengthPasswordRoundTrips) {
 }
 
 INSTANTIATE_TEST_SUITE_P(PwLen3, PwLengthFixture,
-                         ::testing::Values(6, 9, 10, 11, 12, 13, 14, 18, 20,
-                                           24));
+                        ::testing::Values(6, 9, 10, 11, 12, 13, 14, 18, 20, 24));
 
 TEST_P(PwLengthFixture, MidLengthPasswordRoundTrips) {
   DB db;
@@ -664,8 +661,7 @@ TEST_P(PwLengthFixture, MidLengthPasswordRoundTrips) {
 }
 
 INSTANTIATE_TEST_SUITE_P(PwLen4, PwLengthFixture,
-                         ::testing::Values(25, 26, 27, 28, 29, 30, 36, 48,
-                                           96, 192));
+                        ::testing::Values(25, 26, 27, 28, 29, 30, 36, 48, 96, 192));
 
 TEST_P(PwLengthFixture, LargerPasswordRoundTrips) {
   DB db;
@@ -679,8 +675,7 @@ TEST_P(PwLengthFixture, LargerPasswordRoundTrips) {
 }
 
 INSTANTIATE_TEST_SUITE_P(PwLen5, PwLengthFixture,
-                         ::testing::Values(40, 44, 50, 55, 60, 70, 80, 90,
-                                           100, 110));
+                        ::testing::Values(40, 44, 50, 55, 60, 70, 80, 90, 100, 110));
 
 TEST_P(PwLengthFixture, ExtraRangePasswordRoundTrips) {
   DB db;
@@ -693,9 +688,9 @@ TEST_P(PwLengthFixture, ExtraRangePasswordRoundTrips) {
   EXPECT_TRUE(TimedAuth(user, ap, db[user], pl));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 14: All-byte-values passwords (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class ByteValueFixture : public ::testing::TestWithParam<int> {};
 // Test byte values 0x01..0x32 (50 values; 0x00 alone would be empty)
@@ -719,9 +714,9 @@ TEST_P(ByteValueFixture, SingleByteAllValuesRoundTrip) {
   EXPECT_TRUE(ok);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 15: Stress — rapid sequential auths (50 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class StressFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(Stress, StressFixture, ::testing::Range(0, 10));
@@ -757,7 +752,7 @@ TEST_P(StressFixture, 10RapidRegistrationsAllUnique) {
   for (int i = 0; i < 10; ++i) {
     DB db;
     std::string user = "rapid_" + std::to_string(GetParam()) + "_" +
-                       std::to_string(i);
+                      std::to_string(i);
     auto rp = Pw("rpass_" + std::to_string(i));
     TimedRegister(user, rp, db);
     salts.push_back(db[user]);
@@ -793,13 +788,13 @@ TEST_P(StressFixture, 20CorrectAuthsAllPass) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 16: Concurrent registration + auth (30 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class ConcurrentFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(Concurrent, ConcurrentFixture,
-                         ::testing::Range(0, 10));
+                        ::testing::Range(0, 10));
 
 TEST_P(ConcurrentFixture, ConcurrentRegistrationsNoRace) {
   // Each thread gets its own DB — no shared mutable state
@@ -869,9 +864,9 @@ TEST_P(ConcurrentFixture, ConcurrentMixedCorrectWrong) {
   EXPECT_EQ(wrong_count.load(), N / 2);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 17: Crypto property — E != ED (20 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class CryptoFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(Crypto, CryptoFixture, ::testing::Range(0, 10));
@@ -897,9 +892,9 @@ TEST_P(CryptoFixture, TwoRegsProduceDifferentE) {
   EXPECT_NE(pl1.encrypted_secret_e, pl2.encrypted_secret_e);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 18: No throw guarantee (30 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class NoThrowFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(NoThrow, NoThrowFixture, ::testing::Range(0, 15));
@@ -922,9 +917,9 @@ TEST_P(NoThrowFixture, AuthNoThrowWrongPass) {
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 19: Special character passwords (40 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class SpecialCharFixture : public ::testing::TestWithParam<std::string> {};
 INSTANTIATE_TEST_SUITE_P(
@@ -953,9 +948,9 @@ TEST_P(SpecialCharFixture, SpecialCharPasswordRoundTrips) {
   EXPECT_TRUE(TimedAuth(user, ap, db[user], pl));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 20: Case sensitivity (20 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 struct CasePair { std::string correct; std::string wrong; };
 class CaseFixture : public ::testing::TestWithParam<CasePair> {};
@@ -999,13 +994,13 @@ TEST_P(CaseFixture, CaseSensitiveAuth) {
   EXPECT_TRUE(TimedAuth(user, ap_correct, db[user], pl));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 21: Tampered salt fails auth (30 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class TamperedSaltFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(TamperedSalt, TamperedSaltFixture,
-                         ::testing::Range(0, 15));
+                        ::testing::Range(0, 15));
 
 TEST_P(TamperedSaltFixture, FlippedSaltBitFails) {
   DB db;
@@ -1034,13 +1029,13 @@ TEST_P(TamperedSaltFixture, ZeroedSaltFails) {
   EXPECT_FALSE(TimedAuth(user, ap, zeroed_salt, pl));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 22: VerifyOnServer direct tests (30 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class VerifyServerFixture : public ::testing::TestWithParam<int> {};
 INSTANTIATE_TEST_SUITE_P(VerifyServer, VerifyServerFixture,
-                         ::testing::Range(0, 15));
+                        ::testing::Range(0, 15));
 
 TEST_P(VerifyServerFixture, CorrectHashVerifies) {
   DB db;
@@ -1066,9 +1061,9 @@ TEST_P(VerifyServerFixture, WrongHashDoesNotVerify) {
   EXPECT_FALSE(auth::VerifyOnServer(user, hash, pl));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // SECTION 23: Misc edge cases (20 tests)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 TEST_F(AuthFixture, PayloadUsernameMatchesInput) {
   EXPECT_EQ(payload.username, kUser);
@@ -1148,9 +1143,9 @@ TEST_P(MiscFixture, RandomPasswordRoundTrip) {
   EXPECT_TRUE(TimedAuth(user, ap, db[user], pl));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 // PERF REPORT — runs once at program end via environment listener
-// ═══════════════════════════════════════════════════════════════════════════════
+// ---
 
 class PerfReportListener : public ::testing::EmptyTestEventListener {
   void OnTestProgramEnd(const ::testing::UnitTest& unit) override {
@@ -1165,7 +1160,7 @@ class PerfReportListener : public ::testing::EmptyTestEventListener {
       double p50 = v[v.size() / 2];
       double p95 = v[static_cast<size_t>(v.size() * 0.95)];
       double p99 = v[static_cast<size_t>(v.size() * 0.99)];
-      printf("\n── %s (n=%zu) ──────────────────────────\n", name, v.size());
+      printf("\n--- %s (n=%zu) ---\n", name, v.size());
       printf("  avg:  %8.1f µs\n", avg);
       printf("  min:  %8.1f µs\n", v.front());
       printf("  p50:  %8.1f µs\n", p50);
@@ -1174,14 +1169,14 @@ class PerfReportListener : public ::testing::EmptyTestEventListener {
       printf("  max:  %8.1f µs\n", v.back());
     };
 
-    printf("\n\n══════════════════════════════════════════\n");
+    printf("\n\n==============================\n");
     printf("  Auth Protocol Performance Report\n");
-    printf("══════════════════════════════════════════\n");
+    printf("==============================\n");
     printf("  Tests passed: %d / %d\n",
-           unit.successful_test_count(), unit.total_test_count());
+          unit.successful_test_count(), unit.total_test_count());
     stats(p.reg_us,  "Registration  (Protocol 1)");
     stats(p.auth_us, "Authentication (Protocol 2)");
-    printf("══════════════════════════════════════════\n\n");
+    printf("==============================\n\n");
 
     // Write CSV for external analysis
     std::ofstream csv("/tmp/auth_perf.csv");
