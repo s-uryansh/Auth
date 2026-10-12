@@ -4,6 +4,7 @@ vcpkg_installed/
 
 # Build directory
 build/
+build_android/
 bin/
 lib/
 
