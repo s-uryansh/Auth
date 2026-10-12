@@ -221,8 +221,7 @@ export VCPKG_ROOT=~/vcpkg
 git clone https://github.com/s-uryansh/Auth
 cd Auth
 
-cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake
-cmake --build build
+make build       # Build all desktop targets && cmake --build build
 ```
 
 ---
@@ -290,3 +289,101 @@ The test suite runs 1000+ parameterized cases across 23 sections and prints a pe
 ```
 
 ---
+---
+
+## Architecture Diagrams
+
+Two architecture diagrams are provided:
+
+1. **`Agents.md`** (line 91) - Comprehensive diagram embedded in the knowledge base, covering protocol stack, data structures, flow summaries, and all project components.
+
+2. **`architecture_diagram.mmd`** - Separate Mermaid diagram file that can be rendered by Mermaid-capable tools (VS Code, Obsidian, GitHub, etc.). Contains the same architectural overview but in a standalone file format.
+
+Both diagrams maintain synchronization and cover the same architectural elements: client/user, server/database, build/CI, Qt 6 GUI, and all protocol versions (V1/V2/V3).
+
+## Build & Test Instructions
+
+### Prerequisites
+- CMake >= 3.20
+- C++17 Compiler
+- Git
+- Vcpkg package manager
+
+### Setup Vcpkg
+```bash
+git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
+~/vcpkg/bootstrap-vcpkg.sh
+export VCPKG_ROOT=~/vcpkg
+```
+
+### Building
+
+```bash
+cd Auth
+make build       # Build all desktop targets (AuthLib, AuthUI, AuthTests, AuthQt)
+make test        # Run 1445 tests
+make ui          # Run AuthQt GUI (requires X display server)
+make demo        # Run AuthUI console demo
+```
+---
+
+## Android Build Instructions
+
+This project can be built for Android using CMake and the Android NDK. The CMakeLists.txt includes platform detection for Android (`CMAKE_ANDROID_NDK`).
+
+### Prerequisites
+
+- Android NDK (r21 or newer recommended)
+- CMake >= 3.20 (already required)
+- Python 3 (for some NDK toolchain scripts)
+
+### Build Command
+
+```bash
+# Set ANDROID_NDK_ROOT to your NDK location
+export ANDROID_NDK_ROOT=/path/to/android-ndk
+
+# Configure for Android x86_64
+cmake -B build_android -S . -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
+  -DCMAKE_ANDROID_NDK=${ANDROID_NDK_ROOT} \
+  -DCMAKE_ANDROID_ARCH_x86_64=YES \
+  -DCMAKE_ANDROID_PLATFORM=android-30
+
+# Build Android targets
+cmake --build build_android
+
+# The following targets will be available:
+# - AuthLib (static library)
+# - AuthUI (console demo, runs via Termux or emulated terminal)
+# - AuthQt (Qt 6 GUI application - generates Android Gradle project)
+```
+
+### Android-Specific Notes
+
+- **Qt 6 GUI (AuthQt)**: When building for Android, CMake will configure Qt's Android modules. The actual APK generation typically requires Gradle. You can generate the Gradle project with:
+  ```bash
+  cmake --build build_android --target generate_android_gradle_projects
+  ```
+  Or manually run `android update project -p . -s` from the NDK's `tools/` directory.
+
+- **Authentication UI**: The `AuthUI` executable can run in Termux or an emulated terminal on Android. Note that text input uses the device's keyboard.
+
+- **QR Vault Sync (Protocol 4)**: Works on Android via the `QRSyncTab` Qt widget, which uses TCP/UDP over Wi-Fi Direct or hotspot. Both devices must be on the same network.
+
+- **Dependencies**: The vcpkg-managed dependencies (OpenSSL, liboqs, Argon2, GTest) are for the desktop build. For Android, you may need to build these from source or use Android-specific prebuilt libraries. The CMakeLists.txt currently skips vcpkg includes when `CMAKE_ANDROID_NDK` is set.
+
+- **Testing**: GTest-based unit tests are skipped for Android builds (`AuthUnitTests` target is not generated). Manual verification via `AuthUI` is recommended.
+
+### Full Android Configure Example
+
+```bash
+export ANDROID_NDK_ROOT=/home/user/Android/Sdk/ndk/25.2.1706372
+cmake -B build_android -S . \
+  -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
+  -DCMAKE_ANDROID_NDK=${ANDROID_NDK_ROOT} \
+  -DCMAKE_ANDROID_ARCH_x86_64=YES \
+  -DCMAKE_ANDROID_ARCH_AARCH64=YES \
+  -DCMAKE_ANDROID_PLATFORM=android-30 \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build_android
+```

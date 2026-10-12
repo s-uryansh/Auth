@@ -1,0 +1,9 @@
+# AddressSanitizer suppressions for system library leaks in AuthUI/AuthTests
+# These are false positives from Qt6/GUI dependencies, not application-level leaks.
+
+leak:libfontconfig
+leak:libpango
+leak:libgtk-3
+leak:libqgtk3
+leak:libharfbuzz
+leak:libcairo
