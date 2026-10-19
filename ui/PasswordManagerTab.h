@@ -1,20 +1,21 @@
 #pragma once
 
-#include <QWidget>
-#include <QLineEdit>
-#include <QPushButton>
 #include <QLabel>
+#include <QElapsedTimer>
+#include <QLineEdit>
 #include <QListWidget>
-#include <QPlainTextEdit>
-#include <QGroupBox>
-#include <QFormLayout>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
-#include <QString>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QStackedWidget>
+#include <QTimer>
+#include <QWidget>
 
-#include <string>
+#include <QVBoxLayout>
+
+#include <memory>
 #include <vector>
 
+#include "PasswordVaultFileStore.h"
 #include "auth/vault.hpp"
 
 class PasswordManagerTab : public QWidget {
@@ -27,29 +28,48 @@ public:
 private slots:
     void onSetupClicked();
     void onAddClicked();
-    void onRetrieveClicked();
-    void onLockClicked();
+    void onShowBrowseClicked();
+    void onShowAddClicked();
+    void onWebsiteClicked(QListWidgetItem *item);
+    void checkRevealSession();
 
 private:
-    void log(const QString &msg);
     void updateStatus(const QString &status);
-    bool isUnlocked() const;
+    void clearEntries();
+    void clearCredentialCards();
+    void refreshWebsiteList();
+    void filterWebsiteList(const QString &query);
+    void revealWebsiteCredentials(const QString &website);
+    bool unlockForViewing();
+
+    QStackedWidget *pages_;
+    QWidget *setup_page_;
+    QWidget *add_page_;
+    QWidget *browse_page_;
 
     QLineEdit *master_pass_input_;
     QLineEdit *website_input_;
     QLineEdit *username_input_;
+    QLineEdit *credential_password_input_;
     QPushButton *setup_btn_;
     QPushButton *add_btn_;
-    QPushButton *retrieve_btn_;
-    QPushButton *lock_btn_;
+    QPushButton *show_browse_btn_;
+    QPushButton *show_add_btn_;
+    QLineEdit *search_input_;
+    QListWidget *website_list_;
+    QWidget *credential_cards_widget_;
+    QVBoxLayout *credential_cards_layout_;
+    QScrollArea *credential_details_;
+    QLabel *browse_placeholder_;
     QLabel *status_label_;
-    QListWidget *entry_list_;
-    QPlainTextEdit *log_view_;
+    QTimer *session_timer_;
+    QElapsedTimer session_clock_;
+    QString selected_website_;
 
-    std::vector<uint8_t> salt_;
-    auth::Argon2Params params_;
-    std::vector<uint8_t> encrypted_vault_;
+    std::unique_ptr<PasswordVaultFileStore> store_;
+    PasswordVaultFile vault_file_;
+    std::vector<uint8_t> active_key_;
     std::vector<auth::VaultEntry> entries_;
-    bool unlocked_ = false;
-    bool vault_exists_ = false;
+    bool vault_available_ = false;
+    bool viewing_unlocked_ = false;
 };

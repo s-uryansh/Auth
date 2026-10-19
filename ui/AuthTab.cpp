@@ -13,6 +13,36 @@
 
 #include <stdexcept>
 
+static QString registrationPasswordError(const QString &password) {
+    const QVector<uint> code_points = password.toUcs4();
+    if (code_points.size() < 8) {
+        return "Password must be at least 8 characters long";
+    }
+
+    bool has_uppercase = false;
+    bool has_lowercase = false;
+    bool has_digit = false;
+    bool has_special = false;
+
+    for (uint code_point : code_points) {
+        has_uppercase = has_uppercase || (code_point >= 'A' && code_point <= 'Z');
+        has_lowercase = has_lowercase || (code_point >= 'a' && code_point <= 'z');
+        has_digit = has_digit || (code_point >= '0' && code_point <= '9');
+        has_special = has_special ||
+            (code_point >= 0x21 && code_point <= 0x7E &&
+             !(code_point >= 'A' && code_point <= 'Z') &&
+             !(code_point >= 'a' && code_point <= 'z') &&
+             !(code_point >= '0' && code_point <= '9'));
+    }
+
+    if (!has_uppercase || !has_lowercase || !has_digit || !has_special) {
+        return "Password must include an uppercase letter, a lowercase letter, "
+               "a number, and a special character";
+    }
+
+    return {};
+}
+
 static std::vector<uint8_t> secureInput(const QString &text) {
     std::string s = text.toStdString();
     std::vector<uint8_t> v(s.begin(), s.end());
@@ -75,12 +105,28 @@ void AuthTab::onRegisterClicked() {
         return;
     }
 
+    const std::string username = user.toStdString();
+    if (server_db_.find(username) != server_db_.end()) {
+        QMessageBox::warning(this, "Registration Error",
+                             "That username is already registered");
+        status_label_->setText("Registration failed: username already exists");
+        return;
+    }
+
+    const QString policy_error = registrationPasswordError(pass);
+    if (!policy_error.isEmpty()) {
+        QMessageBox::warning(this, "Password Requirements", policy_error);
+        status_label_->setText("Registration failed: password requirements");
+        return;
+    }
+
     try {
         std::vector<uint8_t> server_r = generateNonce();
         std::vector<uint8_t> pw = secureInput(pass);
 
-        server_db_[user.toStdString()] =
-            auth::RegisterUser(user.toStdString(), pw, server_r, user_db_);
+        auth::RegistrationPayload payload =
+            auth::RegisterUser(username, pw, server_r, user_db_);
+        server_db_.emplace(username, std::move(payload));
 
         log("Registered: " + user);
         status_label_->setText("Registered: " + user);
@@ -117,6 +163,7 @@ void AuthTab::onLoginClicked() {
         if (ok) {
             log("Login OK: " + user);
             status_label_->setText("Authenticated: " + user);
+            emit authenticationSucceeded();
         } else {
             log("Login failed: " + user);
             status_label_->setText("Rejected: " + user);

@@ -18,6 +18,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     tabs_->addTab(auth_tab_, "Auth");
     tabs_->addTab(pm_tab_, "Password Manager");
     tabs_->addTab(qr_tab_, "QR Sync");
+    tabs_->setTabVisible(1, false);
+    tabs_->setTabVisible(2, false);
+
+    connect(auth_tab_, &AuthTab::authenticationSucceeded, this, [this]() {
+        tabs_->setTabVisible(1, true);
+        tabs_->setTabVisible(2, true);
+    });
 
     setCentralWidget(tabs_);
 }

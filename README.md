@@ -105,26 +105,31 @@ Server never receives `P`. Wrong password → wrong `C` → wrong `D'` → no ma
 ```text
 Auth/
 ├── include/auth/
-│   ├── crypto_utils.hpp   # RAII wrappers: EvpMdCtxPtr, EvpPkeyPtr, EvpPkeyCtxPtr
-│   ├── kem_utils.hpp      # ML-KEM-768 hybrid KEM/DEM: MlKemEncrypt(), MlKemDecrypt(), XorBytes()
-│   ├── server_keys.hpp    # ML-KEM-768 keypair singleton (GetServerKeys())
-│   ├── Registration.hpp   # RegisterUser() — 4-arg (explicit R) and 3-arg (R generated internally)
-│   └── Authentication.hpp # ComputeClientHash(), VerifyOnServer(), AuthenticateUser()
+│   ├── Authentication.hpp
+│   ├── Registration.hpp
+│   ├── crypto_utils.hpp
+│   ├── kem_utils.hpp
+│   ├── server_keys.hpp
+│   └── vault.hpp          # Argon2id key derivation and AES-256-GCM vault functions
 ├── src/
-│   ├── Registration.cpp   # Protocol 1 implementation
-│   ├── Authentication.cpp # Protocol 2 implementation
-│   └── main.cpp           # Demo: register + valid auth + invalid auth
+│   ├── Authentication.cpp
+│   ├── Registration.cpp
+│   ├── main.cpp           # Console protocol demonstration
+│   └── vault.cpp
+├── ui/
+│   ├── AuthTab.*
+│   ├── MainWindow.*
+│   ├── PasswordManagerTab.*
+│   ├── PasswordVaultFileStore.*
+│   └── QRSyncTab.*
+├── android/               # Qt Android package manifest
+├── triplets/              # x64-linux and arm64-android vcpkg triplets
 ├── tests/
-│   └── test_auth.cpp      # GTest suite (1000+ tests + perf report)
-├── .github/workflows/
-│   └── ci.yml             # Build + test on push/PR
-├── .vscode/
-│   ├── c_cpp_properties.json
-│   └── settings.json
+│   ├── README.md
+│   └── test_auth.cpp
 ├── CMakeLists.txt
-├── vcpkg.json             # Dependencies: openssl, liboqs, gtest
-├── .clang-format
-└── .clang-tidy
+├── Makefile
+└── vcpkg.json             # OpenSSL, liboqs, Argon2; GTest for host builds
 ```
 
 ---
@@ -182,208 +187,79 @@ Three functions with explicit client/server boundary:
 
 ## Current Status
 
-**Done**
-- Phase 1 (Registration) + Phase 2 (Authentication) fully implemented — Protocol V2
-- Server nonce R integrated into registration and authentication flows
-- ML-KEM-768 + AES-256-GCM hybrid encryption (FIPS 203) — replaces RSA-2048 OAEP
-- Client/server boundary split into distinct functions
-- RAII for all OpenSSL contexts
-- Constant-time comparison, secure memory erasure
-- 3-arg `RegisterUser` convenience overload for test use
+The cryptographic registration and authentication protocol is implemented, and the Qt desktop application now includes Auth gating and a persistent Password Manager vault. Auth records remain in memory for the current application run; the application does not yet separate client and server over a real network.
 
-**Remaining**
-- Persistent storage (currently in-memory `unordered_map`)
-- Actual network separation between client and server
-- Password change / re-registration flow
-- Multi-user concurrency
+### Authentication and feature access
 
----
+- Registration rejects a username already registered in the current run.
+- Registration passwords require at least eight Unicode characters, one ASCII uppercase letter, one ASCII lowercase letter, one digit, and one ASCII punctuation character.
+- Password Manager and QR Sync stay hidden until a successful login. Registering alone does not reveal them.
+- QR Sync source and behavior were not changed as part of this work.
 
-## Install Prerequisites
+### Password Manager
 
-### Prerequisites
-- CMake >= 3.20
-- C++17 Compiler
-- Git
+- The first visit asks the user to set a master password. After setup, the app shows the credential-add workflow.
+- Credentials contain the entered website URL, username, and password. The vault is encrypted with the existing Argon2id and AES-256-GCM implementation and stored in the app-specific data directory as `password-vault.dat`.
+- Website URLs are kept in a plaintext index so the site list remains searchable while locked. Usernames and passwords are encrypted.
+- The first reveal in a session asks for the master password. Revealed credentials remain available for ten minutes from that first successful unlock; activity does not extend the session.
+- Username and password have separate copy actions. The website action opens valid HTTP(S) URLs through the system handler. Clipboard contents are not cleared automatically.
+- The vault is device-local and is not partitioned by Auth username. Auth accounts and records are still in-memory only.
 
-### Setup
-Vcpkg [clone] get package manager. Run bootstrap.
+### Android
 
-```bash
-git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
-~/vcpkg/bootstrap-vcpkg.sh
-export VCPKG_ROOT=~/vcpkg
-```
+The Qt Widgets application builds as an arm64-v8a debug APK. The Android minimum and target SDK versions are 30; this environment uses compile SDK 37. The package identifier is `org.tmps.auth`. The default Makefile build directory is `build_android_arm64`.
 
-## Building
+## Prerequisites
 
-```bash
-git clone https://github.com/s-uryansh/Auth
-cd Auth
+For a desktop build:
 
-make build       # Build all desktop targets && cmake --build build
-```
+- CMake 3.20 or newer
+- C++17 compiler
+- vcpkg with the project manifest dependencies
+- Qt 6 Widgets/Core/Gui for the desktop UI
 
----
+For Android, also install a Qt 6.12 Android arm64 kit and matching Qt host kit, Android SDK/build tools, Android NDK, and Gradle. The example command below uses the paths installed in this development environment; override them for your machine.
+
+## Build and run
+
+Configure and build the desktop Qt app:
 
 ```bash
-ctest --test-dir build --output-on-failure
-# or verbose:
-./build/AuthTests
+cmake -B build -S . \
+  -DCMAKE_TOOLCHAIN_FILE="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+  -DVCPKG_TARGET_TRIPLET=x64-linux
+cmake --build build --target AuthQt -j2
 ```
 
-The test suite runs 1000+ parameterized cases across 23 sections and prints a performance report on completion:
+Build all desktop targets with `make build`. Run the GUI with `make ui`, the console demonstration with `make demo`, and the existing GTest suite with `make test` or `ctest --test-dir build --output-on-failure`.
+
+The test suite covers the protocol library; it does not currently exercise the Qt Auth or Password Manager flows.
+
+## Build the Android APK
+
+The Make target configures the arm64-v8a vcpkg triplet, builds OpenSSL, liboqs, and Argon2 for Android, then invokes Qt's APK packaging target:
+
+```bash
+make android \
+  ANDROID_NDK=/opt/android-ndk/android-ndk-r30 \
+  ANDROID_SDK_ROOT="$HOME/Android/Sdk" \
+  QT_ANDROID_PREFIX=/home/s-uryansh/Qt/6.12.0/android_arm64_v8a \
+  QT_HOST_PREFIX=/home/s-uryansh/Qt/6.12.0/gcc_64
+```
+
+`ANDROID_NDK` and `ANDROID_SDK_ROOT` are required. `QT_ANDROID_PREFIX` defaults to `/home/s-uryansh/Qt/6.12.0/android_arm64_v8a`, and `QT_HOST_PREFIX` defaults to `/home/s-uryansh/Qt/6.12.0/gcc_64`; override both when Qt is installed elsewhere. `VCPKG_ROOT` can also be supplied if vcpkg is not at `~/vcpkg`. Set `ANDROID_BUILD_DIR` to use a different build directory.
+
+The debug APK is written to:
 
 ```text
-==============================
-  Auth Protocol Performance Report
-==============================
---- Registration  (Protocol 1) ---
---- Authentication (Protocol 2) ---
-==============================
+build_android_arm64/android-build/build/outputs/apk/debug/android-build-debug.apk
 ```
 
+This target builds a debug APK for local installation. A production release requires release signing configuration.
 
-| Section | What it covers |
-|---------|---------------|
-| Registration structural | Username in payload, salt size, E/ED non-empty, KEM ciphertext size |
-| Password wiping | `OPENSSL_cleanse` after registration and authentication |
-| Salt uniqueness | Fresh `RAND_bytes` per registration, same-user re-registration |
-| Correct password succeeds | 50 passwords × round-trip + repeat |
-| Wrong password fails | 50 pairs, no information leak |
-| Empty / boundary passwords | Empty, single-byte correct and wrong |
-| Client hash determinism | Same `S+P` → same `C`; different salt → different `C` |
-| Hash differs for different passwords | `H(S,P1) != H(S,P2)`; output is 32 bytes |
-| Server username validation | Wrong username rejected, correct accepted |
-| Password wipe after auth | Zeroed on success and failure |
-| Multi-user isolation | Cross-user auth fails; independent auth succeeds |
-| Cross-payload attacks | Correct hash against wrong payload fails; swapped salt fails |
-| Password length spectrum | 1–512 bytes, odd/even lengths, off-by-one |
-| All-byte-value passwords | Single-byte 0x01–0x32 round-trips |
-| Stress — rapid sequential | 5×, 20× correct; wrong-then-correct; alternating |
-| Concurrent registration+auth | 4-thread races, mixed correct/wrong |
-| Crypto properties | E ≠ ED; KEM probabilistic (two regs → different E) |
-| No-throw guarantee | Registration and wrong-password auth never throw |
-| Special character passwords | Control bytes, null-embedded, punctuation |
-| Case sensitivity | 20 correct/wrong case pairs |
-| Tampered salt | Bit-flip and zeroed salt both fail |
-| VerifyOnServer direct | Correct hash verifies; wrong hash does not |
-| Misc edge cases | Fixture-level assertions, random round-trips |
+## Further documentation
 
----
-
-## Running
-
-```bash
-./build/AuthApp
-```
-
-```text
-[Registration] OK
-  Enc = ML-KEM-768 + AES-256-GCM (hybrid, FIPS 203)
-  ServerDB stores: {U, R, E=HybridEnc(PKs,B⊕R), ED=HybridEnc(PKs,D)}
-  UserDB   stores: {S}
-
-[Auth valid]   PASS
-[Auth invalid] PASS (correctly rejected)
-```
-
----
----
-
-## Architecture Diagrams
-
-Two architecture diagrams are provided:
-
-1. **`Agents.md`** (line 91) - Comprehensive diagram embedded in the knowledge base, covering protocol stack, data structures, flow summaries, and all project components.
-
-2. **`architecture_diagram.mmd`** - Separate Mermaid diagram file that can be rendered by Mermaid-capable tools (VS Code, Obsidian, GitHub, etc.). Contains the same architectural overview but in a standalone file format.
-
-Both diagrams maintain synchronization and cover the same architectural elements: client/user, server/database, build/CI, Qt 6 GUI, and all protocol versions (V1/V2/V3).
-
-## Build & Test Instructions
-
-### Prerequisites
-- CMake >= 3.20
-- C++17 Compiler
-- Git
-- Vcpkg package manager
-
-### Setup Vcpkg
-```bash
-git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
-~/vcpkg/bootstrap-vcpkg.sh
-export VCPKG_ROOT=~/vcpkg
-```
-
-### Building
-
-```bash
-cd Auth
-make build       # Build all desktop targets (AuthLib, AuthUI, AuthTests, AuthQt)
-make test        # Run 1445 tests
-make ui          # Run AuthQt GUI (requires X display server)
-make demo        # Run AuthUI console demo
-```
----
-
-## Android Build Instructions
-
-This project can be built for Android using CMake and the Android NDK. The CMakeLists.txt includes platform detection for Android (`CMAKE_ANDROID_NDK`).
-
-### Prerequisites
-
-- Android NDK (r21 or newer recommended)
-- CMake >= 3.20 (already required)
-- Python 3 (for some NDK toolchain scripts)
-
-### Build Command
-
-```bash
-# Set ANDROID_NDK_ROOT to your NDK location
-export ANDROID_NDK_ROOT=/path/to/android-ndk
-
-# Configure for Android x86_64
-cmake -B build_android -S . -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
-  -DCMAKE_ANDROID_NDK=${ANDROID_NDK_ROOT} \
-  -DCMAKE_ANDROID_ARCH_x86_64=YES \
-  -DCMAKE_ANDROID_PLATFORM=android-30
-
-# Build Android targets
-cmake --build build_android
-
-# The following targets will be available:
-# - AuthLib (static library)
-# - AuthUI (console demo, runs via Termux or emulated terminal)
-# - AuthQt (Qt 6 GUI application - generates Android Gradle project)
-```
-
-### Android-Specific Notes
-
-- **Qt 6 GUI (AuthQt)**: When building for Android, CMake will configure Qt's Android modules. The actual APK generation typically requires Gradle. You can generate the Gradle project with:
-  ```bash
-  cmake --build build_android --target generate_android_gradle_projects
-  ```
-  Or manually run `android update project -p . -s` from the NDK's `tools/` directory.
-
-- **Authentication UI**: The `AuthUI` executable can run in Termux or an emulated terminal on Android. Note that text input uses the device's keyboard.
-
-- **QR Vault Sync (Protocol 4)**: Works on Android via the `QRSyncTab` Qt widget, which uses TCP/UDP over Wi-Fi Direct or hotspot. Both devices must be on the same network.
-
-- **Dependencies**: The vcpkg-managed dependencies (OpenSSL, liboqs, Argon2, GTest) are for the desktop build. For Android, you may need to build these from source or use Android-specific prebuilt libraries. The CMakeLists.txt currently skips vcpkg includes when `CMAKE_ANDROID_NDK` is set.
-
-- **Testing**: GTest-based unit tests are skipped for Android builds (`AuthUnitTests` target is not generated). Manual verification via `AuthUI` is recommended.
-
-### Full Android Configure Example
-
-```bash
-export ANDROID_NDK_ROOT=/home/user/Android/Sdk/ndk/25.2.1706372
-cmake -B build_android -S . \
-  -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
-  -DCMAKE_ANDROID_NDK=${ANDROID_NDK_ROOT} \
-  -DCMAKE_ANDROID_ARCH_x86_64=YES \
-  -DCMAKE_ANDROID_ARCH_AARCH64=YES \
-  -DCMAKE_ANDROID_PLATFORM=android-30 \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build build_android
-```
+- [Design spec](docs/superpowers/specs/2026-10-19-auth-password-manager-android-design.md)
+- [Auth registration and feature gating plan](docs/superpowers/plans/2026-10-19-auth-registration-gating.md)
+- [Password Manager vault plan](docs/superpowers/plans/2026-10-19-password-manager-vault.md)
+- [Android APK plan](docs/superpowers/plans/2026-10-19-android-apk.md)

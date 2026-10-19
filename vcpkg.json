@@ -5,6 +5,10 @@
   "dependencies": [
     "openssl",
     "liboqs",
-    "gtest"
+    "argon2",
+    {
+      "name": "gtest",
+      "host": true
+    }
   ]
 }

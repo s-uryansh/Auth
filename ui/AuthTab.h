@@ -20,6 +20,9 @@ public:
     explicit AuthTab(QWidget *parent = nullptr);
     ~AuthTab() override;
 
+signals:
+    void authenticationSucceeded();
+
 private slots:
     void onRegisterClicked();
     void onLoginClicked();

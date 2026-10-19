@@ -5,6 +5,7 @@ vcpkg_installed/
 # Build directory
 build/
 build_android/
+build_android_arm64/
 bin/
 lib/
 
@@ -19,5 +20,5 @@ lib/
 Thumbs.db
 
 TMPS_Auth.pdf
-
+task.md
 Agents.md
