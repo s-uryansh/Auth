@@ -1,4 +1,5 @@
 #include "PasswordManagerTab.h"
+#include "SensitiveData.h"
 
 #include <QDir>
 #include <QDesktopServices>
@@ -16,23 +17,11 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-#include <openssl/crypto.h>
-
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
 
 namespace {
-
-std::vector<uint8_t> secureInput(const QString &text) {
-    QByteArray utf8 = text.toUtf8();
-    std::vector<uint8_t> bytes(utf8.begin(), utf8.end());
-    if (!bytes.empty()) {
-        OPENSSL_cleanse(utf8.data(),
-                        static_cast<size_t>(utf8.size()));
-    }
-    return bytes;
-}
 
 QString normalizedWebsite(const QString &raw_website) {
     QString value = raw_website.trimmed();
@@ -48,24 +37,17 @@ QString normalizedWebsite(const QString &raw_website) {
     return url.toString(QUrl::FullyEncoded);
 }
 
-void wipeBytes(std::vector<uint8_t> &bytes) {
-    if (!bytes.empty()) {
-        OPENSSL_cleanse(bytes.data(), bytes.size());
-        bytes.clear();
-    }
-}
-
 std::vector<uint8_t> deriveKeyFromText(
     const QString &text,
     const std::vector<uint8_t> &salt,
     const auth::Argon2Params &params) {
-    std::vector<uint8_t> password = secureInput(text);
+    std::vector<uint8_t> password = ui::secureInputBytes(text);
     try {
         std::vector<uint8_t> key = auth::DeriveKey(password, salt, params);
-        wipeBytes(password);
+        ui::wipeBytes(password);
         return key;
     } catch (...) {
-        wipeBytes(password);
+        ui::wipeBytes(password);
         throw;
     }
 }
@@ -187,7 +169,7 @@ PasswordManagerTab::PasswordManagerTab(QWidget *parent)
 }
 
 PasswordManagerTab::~PasswordManagerTab() {
-    wipeBytes(active_key_);
+    ui::wipeBytes(active_key_);
     clearEntries();
 }
 
@@ -196,14 +178,7 @@ void PasswordManagerTab::updateStatus(const QString &status) {
 }
 
 void PasswordManagerTab::clearEntries() {
-    for (auth::VaultEntry &entry : entries_) {
-        wipeBytes(entry.password);
-        wipeBytes(entry.salt);
-        if (!entry.username.empty()) {
-            OPENSSL_cleanse(entry.username.data(), entry.username.size());
-        }
-    }
-    entries_.clear();
+    ui::wipeVaultEntries(entries_);
 }
 
 void PasswordManagerTab::clearCredentialCards() {
@@ -253,7 +228,7 @@ void PasswordManagerTab::onSetupClicked() {
         vault.ciphertext = auth::EncryptVault(key, {});
         store_->save(vault);
 
-        wipeBytes(active_key_);
+        ui::wipeBytes(active_key_);
         active_key_ = std::move(key);
         vault_file_ = std::move(vault);
         vault_available_ = true;
@@ -314,7 +289,7 @@ void PasswordManagerTab::onAddClicked() {
         auth::VaultEntry entry;
         entry.website = canonical_website.toStdString();
         entry.username = username.toStdString();
-        credential_password = secureInput(password_text);
+        credential_password = ui::secureInputBytes(password_text);
         entry.password = credential_password;
         entries.push_back(std::move(entry));
 
@@ -337,16 +312,9 @@ void PasswordManagerTab::onAddClicked() {
         updateStatus("Credential was not saved");
     }
 
-    wipeBytes(credential_password);
-    for (auth::VaultEntry &entry : entries) {
-        wipeBytes(entry.password);
-        wipeBytes(entry.salt);
-        if (!entry.username.empty()) {
-            OPENSSL_cleanse(entry.username.data(), entry.username.size());
-        }
-    }
-    entries.clear();
-    wipeBytes(operation_key);
+    ui::wipeBytes(credential_password);
+    ui::wipeVaultEntries(entries);
+    ui::wipeBytes(operation_key);
 }
 
 void PasswordManagerTab::onShowBrowseClicked() {
@@ -374,7 +342,7 @@ bool PasswordManagerTab::unlockForViewing() {
             auth::DecryptVault(candidate_key, vault_file_.ciphertext);
         clearEntries();
         entries_ = std::move(decrypted);
-        wipeBytes(active_key_);
+        ui::wipeBytes(active_key_);
         active_key_ = std::move(candidate_key);
         viewing_unlocked_ = true;
         session_clock_.start();
@@ -382,7 +350,7 @@ bool PasswordManagerTab::unlockForViewing() {
         updateStatus("Vault unlocked for 10 minutes");
         return true;
     } catch (const std::exception &e) {
-        wipeBytes(candidate_key);
+        ui::wipeBytes(candidate_key);
         QMessageBox::warning(this, "Vault Unlock Failed",
                              QString::fromUtf8(e.what()));
         updateStatus("Vault remains locked");
@@ -491,6 +459,6 @@ void PasswordManagerTab::checkRevealSession() {
     session_timer_->stop();
     clearCredentialCards();
     clearEntries();
-    wipeBytes(active_key_);
+    ui::wipeBytes(active_key_);
     updateStatus("Vault locked. Enter the master password to view credentials.");
 }

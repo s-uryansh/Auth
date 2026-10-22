@@ -3,11 +3,15 @@
 #include <openssl/evp.h>
 
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <vector>
 
 namespace auth {
 namespace internal {
+
+inline constexpr std::size_t kAesGcmIvBytes = 12;
+inline constexpr std::size_t kAesGcmTagBytes = 16;
 
 // OpenSSL RAII wrappers
 

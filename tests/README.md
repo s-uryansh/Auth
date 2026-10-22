@@ -1,24 +1,11 @@
-# Protocol test suite
+# Tests
 
-The GTest suite in `test_auth.cpp` exercises the authentication and cryptographic protocol library. It does not currently cover the Qt Auth screens, tab gating, Password Manager UI, or Android packaging.
-
-## Build and run
-
-From the repository root, configure and build the desktop test target:
+Run the configured desktop suites from the repository root with:
 
 ```bash
-cmake -B build -S . \
-  -DCMAKE_TOOLCHAIN_FILE="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-  -DVCPKG_TARGET_TRIPLET=x64-linux
-cmake --build build --target AuthTests -j2
-ctest --test-dir build --output-on-failure
-```
-
-Or use the Makefile targets:
-
-```bash
-make build
 make test
 ```
 
-`make test` builds the desktop targets before running CTest. GTest is declared as a host dependency and the test target is not configured for Android.
+The GTest suite in `test_auth.cpp` covers registration, authentication, protocol failure inputs, and vault compatibility. `test_sensitive_data.cpp` covers Qt UTF-8 conversion and sensitive-buffer clearing. `test_vault_storage.cpp` exercises Argon2 key derivation, vault serialization/encryption, tamper rejection, and password-vault file persistence and validation.
+
+Interactive Auth and Password Manager widgets, QR Sync, and Android packaging flows are not exercised by CTest. The Qt application is built as part of the desktop build; it is not registered as a CTest because its normal event loop does not exit on its own. `make test` checks desktop prerequisites and the CTest runner before building and running the suites.

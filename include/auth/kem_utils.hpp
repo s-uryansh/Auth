@@ -27,13 +27,9 @@
 namespace auth {
 namespace internal {
 
-// Wire-format field sizes (all fixed).
-inline constexpr size_t kIvBytes  = 12;  // AES-GCM recommended IV
-inline constexpr size_t kTagBytes = 16;  // AES-GCM authentication tag
-
 // Minimum overhead added to plaintext by MlKemEncrypt.
 inline constexpr size_t kEncryptOverhead =
-    kMlKem768CtBytes + kIvBytes + kTagBytes;
+    kMlKem768CtBytes + kAesGcmIvBytes + kAesGcmTagBytes;
 
 // MlKemEncrypt — Hybrid-encrypt |plaintext| under the server's ML-KEM-768 public key.
 // Returns the wire-format ciphertext blob.
@@ -56,7 +52,7 @@ inline std::vector<uint8_t> MlKemEncrypt(
   }
 
   // 2. Generate random IV
-  std::vector<uint8_t> iv(kIvBytes);
+  std::vector<uint8_t> iv(kAesGcmIvBytes);
   if (RAND_bytes(iv.data(), static_cast<int>(iv.size())) != 1) {
     OPENSSL_cleanse(ss.data(), ss.size());
     throw std::runtime_error("RAND_bytes failed generating IV");
@@ -76,7 +72,7 @@ inline std::vector<uint8_t> MlKemEncrypt(
   }
   // Explicit IV length (redundant for 12-byte GCM but defensive).
   if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN,
-                           static_cast<int>(kIvBytes), nullptr) != 1) {
+                           static_cast<int>(kAesGcmIvBytes), nullptr) != 1) {
     OPENSSL_cleanse(ss.data(), ss.size());
     throw std::runtime_error("EVP_CIPHER_CTX_ctrl SET_IVLEN failed");
   }
@@ -105,9 +101,9 @@ inline std::vector<uint8_t> MlKemEncrypt(
     throw std::runtime_error("EVP_EncryptFinal_ex failed");
   (void)final_len;  // always 0 for GCM
 
-  std::vector<uint8_t> tag(kTagBytes);
+  std::vector<uint8_t> tag(kAesGcmTagBytes);
   if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG,
-                           static_cast<int>(kTagBytes),
+                           static_cast<int>(kAesGcmTagBytes),
                            tag.data()) != 1)
     throw std::runtime_error("EVP_CIPHER_CTX_ctrl GET_TAG failed");
 
@@ -138,13 +134,13 @@ inline std::vector<uint8_t> MlKemDecrypt(
   std::vector<uint8_t> kem_ct(ptr, ptr + kMlKem768CtBytes);
   ptr += kMlKem768CtBytes;
 
-  // iv: next kIvBytes bytes
+  // iv: next kAesGcmIvBytes bytes
   const uint8_t* iv_ptr = ptr;
-  ptr += kIvBytes;
+  ptr += kAesGcmIvBytes;
 
-  // tag: next kTagBytes bytes
-  std::vector<uint8_t> tag(ptr, ptr + kTagBytes);
-  ptr += kTagBytes;
+  // tag: next kAesGcmTagBytes bytes
+  std::vector<uint8_t> tag(ptr, ptr + kAesGcmTagBytes);
+  ptr += kAesGcmTagBytes;
 
   // aead_ct: remainder
   const size_t aead_len = blob.size() - kEncryptOverhead;
@@ -175,7 +171,7 @@ inline std::vector<uint8_t> MlKemDecrypt(
     throw std::runtime_error("EVP_DecryptInit_ex (cipher) failed");
   }
   if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN,
-                           static_cast<int>(kIvBytes), nullptr) != 1) {
+                           static_cast<int>(kAesGcmIvBytes), nullptr) != 1) {
     OPENSSL_cleanse(ss.data(), ss.size());
     throw std::runtime_error("EVP_CIPHER_CTX_ctrl SET_IVLEN failed");
   }
@@ -199,7 +195,7 @@ inline std::vector<uint8_t> MlKemDecrypt(
 
   // Set expected tag before calling Final — OpenSSL requirement.
   if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG,
-                           static_cast<int>(kTagBytes),
+                           static_cast<int>(kAesGcmTagBytes),
                            tag.data()) != 1)
     throw std::runtime_error("EVP_CIPHER_CTX_ctrl SET_TAG failed");
 

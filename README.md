@@ -1,265 +1,171 @@
-# Auth: Cryptographic Registration & Authentication Protocol
+# Auth
 
-C++17 implementation of a two-phase password authentication protocol using ML-KEM-768 + AES-256-GCM hybrid encryption (FIPS 203) and HMAC-based verifiers. Research prototype based on the cryptographic primitives from Kelsey et al. TMPS (NIST/KU Leuven, 2019).
+[![CI](https://github.com/s-uryansh/Auth/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/s-uryansh/Auth/actions/workflows/ci.yml)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)
+![Qt 6](https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white)
 
----
+Auth is a C++17 Qt application containing an in-memory registration/login demo and a device-local encrypted password vault. Its protocol library uses ML-KEM-768, AES-256-GCM, SHA-256, HMAC, and Argon2id.
 
-## Protocol Overview
+After a successful login, the app shows Password Manager and QR Sync. Auth accounts last only for the current run. The vault is stored separately on the device and is not tied to an Auth username.
 
-### Notation
+## Make targets
 
-| Symbol | Meaning |
-|--------|---------|
-| `U` | Username |
-| `P` | Password (plaintext, device-only) |
-| `S` | 128-bit random salt (stored locally on device) |
-| `B` | 128-bit random secret value |
-| `R` | 128-bit server-generated nonce (stored server-side only) |
-| `C` | Password hash: `C = H(S, P)` |
-| `D` | HMAC verifier: `D = HMAC_B(C)` |
-| `E` | Encrypted masked secret: `E = HybridEnc(PKs, B⊕R)` |
-| `ED` | Encrypted verifier: `ED = HybridEnc(PKs, D)` |
-| `PKs / SKs` | Server ML-KEM-768 public/private keypair |
+Run these from the project root:
 
----
+| Command | Purpose |
+| --- | --- |
+| `make` or `make all` | Build desktop first, then package the Android APK |
+| `make build` | Configure and build desktop targets |
+| `make test` | Build desktop targets and run the protocol, helper, vault, and storage tests |
+| `make ui` | Build and launch the Qt application |
+| `make demo` | Build and launch the console demo |
+| `make clean` | Remove the desktop build directory |
+| `make android` | Configure and package the arm64-v8a debug APK |
+| `make android-clean` | Remove the Android build directory |
+| `make preflight-desktop` | Check desktop build prerequisites without building |
+| `make preflight-android` | Check Android packaging prerequisites without building |
+| `make preflight-test` | Check the CTest runner |
+| `make help` | Show available targets |
 
-### Phase 1 — Registration
+Build targets check the prerequisites they use before doing work. Desktop targets check the desktop toolchain; Android packaging checks Android toolchain requirements; `make all` checks both and builds sequentially. `make test` checks desktop prerequisites and the test runner. Help and cleanup targets do not require build toolchains. The three `preflight-*` targets can be run directly to inspect a profile without building.
 
-```text
-User Device                                         Server
-----------------------------------------------------------
-Input: U                  ── U ─────────────────────────>
+After a successful target finishes, Make verifies its expected build artifacts and prints a visible success message with their paths. `make all` prints a final combined desktop and Android success message with the desktop app, console demo, and APK locations. A failed build, test run, or missing APK does not print a success message.
 
-                                    Generate:
-                          <── R ──  R <- RAND_bytes 128-bit nonce
+## Implementation workflows
 
-Generate:
-  S  <- RAND_bytes 128-bit salt
-  B  <- RAND_bytes 128-bit secret
+### Auth registration and login
 
-Compute:
-  E  <- HybridEnc(PKs, B⊕R)   # ML-KEM-768 + AES-256-GCM (FIPS 203)
-  C  <- SHA-256(S || P)
-  D  <- HMAC-SHA256_B(C)
-  ED <- HybridEnc(PKs, D)      # ML-KEM-768 + AES-256-GCM (FIPS 203)
+Accounts are kept in memory for the current app run. Registration validates input and credentials before creating a record. Only a successful login unlocks the gated application features.
 
-Store locally:
-  UserDB[U] <- S
-
-Wipe: P, B, C, D, B⊕R    # OPENSSL_cleanse
-
-Transmit: {U, E, ED} ─────────────────────────────> ServerDB[U] <- {U, R, E, ED}
+```mermaid
+flowchart TD
+    A[Enter username and password] --> B{Register or login?}
+    B -->|Register| C{Both fields present?}
+    C -->|No| E[Show input error]
+    C -->|Yes| D{Username already registered?}
+    D -->|Yes| F[Reject duplicate username]
+    D -->|No| G{Password meets policy?}
+    G -->|No| H[Reject password]
+    G -->|Yes| I[Generate nonce, salt, and secret]
+    I --> J[Create encrypted registration record]
+    J --> K[Store salt and account record in memory]
+    K --> L[Clear password input]
+    B -->|Login| M{Fields present and user registered?}
+    M -->|No| N[Show login error]
+    M -->|Yes| O[Hash password with local salt]
+    O --> P[Verify encrypted server record]
+    P --> Q[Clear password and hash buffers]
+    Q --> R{Authentication succeeded?}
+    R -->|No| S[Keep gated features hidden]
+    R -->|Yes| T[Show authenticated application features]
 ```
 
-### Phase 2 — Authentication
-
-```text
-User Device                                         Server
-----------------------------------------------------------
-Input: U, P
-
-Retrieve: S <- UserDB[U]
-
-Compute:
-  C <- SHA-256(S || P)
-
-Wipe: P                    # OPENSSL_cleanse
-
-Transmit: {U, C} ─────────────────────────────────>
-
-                                    Retrieve: {R, E, ED} <- ServerDB[U]
-
-                                    Compute:
-                                      B⊕R <- HybridDec(SKs, E)
-                                      B   <- (B⊕R) ⊕ R
-                                      D   <- HybridDec(SKs, ED)
-                                      D'  <- HMAC-SHA256_B(C)
-
-                                    Wipe: B⊕R, B, D, D'  # OPENSSL_cleanse
-
-                                    Verify:
-                                      D == D'  ->  SUCCESS  (CRYPTO_memcmp)
-                                      D != D'  ->  FAIL
-```
-
-Server never receives `P`. Wrong password → wrong `C` → wrong `D'` → no match.
-
----
-
-## What Changed from V1
-
-| | V1 | V2 |
-|--|----|----|
-| Encrypted value | `E = Enc(PKs, B)` | `E = HybridEnc(PKs, B⊕R)` |
-| Server stores | `{U, E, ED}` | `{U, R, E, ED}` |
-| Auth decryption | `B ← Dec(SKs, E)` | `B⊕R ← HybridDec(SKs, E)` then `B = (B⊕R) ⊕ R` |
-| Device compromise | B recoverable from E alone | B unrecoverable without R |
-| Offline dict attack | Possible with device+server breach | Requires simultaneous device+server breach |
-
-**Security rationale:** In V1, an attacker who obtains `E` (server DB) and `S` (device DB) can mount an offline dictionary attack — decrypt `E` to get `B`, then brute-force `P` by computing `HMAC_B(H(S, P'))` for each candidate. In V2, decrypting `E` yields only `B⊕R`. Without `R`, which never leaves the server, `B` cannot be recovered. Split-knowledge is now enforced cryptographically: both the device and the server must be compromised simultaneously.
-
----
-
-## Project Structure
-
-```text
-Auth/
-├── include/auth/
-│   ├── Authentication.hpp
-│   ├── Registration.hpp
-│   ├── crypto_utils.hpp
-│   ├── kem_utils.hpp
-│   ├── server_keys.hpp
-│   └── vault.hpp          # Argon2id key derivation and AES-256-GCM vault functions
-├── src/
-│   ├── Authentication.cpp
-│   ├── Registration.cpp
-│   ├── main.cpp           # Console protocol demonstration
-│   └── vault.cpp
-├── ui/
-│   ├── AuthTab.*
-│   ├── MainWindow.*
-│   ├── PasswordManagerTab.*
-│   ├── PasswordVaultFileStore.*
-│   └── QRSyncTab.*
-├── android/               # Qt Android package manifest
-├── triplets/              # x64-linux and arm64-android vcpkg triplets
-├── tests/
-│   ├── README.md
-│   └── test_auth.cpp
-├── CMakeLists.txt
-├── Makefile
-└── vcpkg.json             # OpenSSL, liboqs, Argon2; GTest for host builds
-```
-
----
-
-## Implementation Details
-
-### `server_keys.hpp`
-ML-KEM-768 keypair generated once via `liboqs`, stored in a static singleton `GetServerKeys()`. In production, load from HSM or persistent secure storage instead.
-
-### `kem_utils.hpp`
-Implements the hybrid KEM/DEM scheme used for all asymmetric encryption operations:
-
-- **`MlKemEncrypt(plaintext)`** — ML-KEM-768 encapsulation produces a shared secret; AES-256-GCM encrypts the plaintext under that shared secret. Returns the concatenated KEM ciphertext + GCM ciphertext + GCM tag.
-- **`MlKemDecrypt(ciphertext)`** — ML-KEM-768 decapsulation recovers the shared secret; AES-256-GCM decrypts and authenticates the payload.
-- **`XorBytes(a, b, out)`** — constant-length XOR for `B⊕R` masking and recovery.
-
-Conforms to FIPS 203 (ML-KEM) and provides post-quantum security against harvest-now/decrypt-later attacks.
-
-### `Registration.cpp`
-Protocol 1 (V2): server generates `R` before registration begins; user generates `S`, `B` via `RAND_bytes`; computes `B⊕R`, then `C = SHA-256(S||P)` and `D = HMAC-SHA256_B(C)`; encrypts `B⊕R→E` and `D→ED` via ML-KEM-768 + AES-256-GCM; stores `S` locally; wipes `P`, `B`, `B⊕R`, `C`, `D` via `OPENSSL_cleanse`. Server stores `{U, R, E, ED}`.
-
-Two overloads are provided:
-
-| Signature | Use case |
-|-----------|----------|
-| `RegisterUser(username, password, server_r, local_db)` | Production / main.cpp — caller supplies R from the server |
-| `RegisterUser(username, password, local_db)` | Tests / simulations — R generated internally |
-
-### `Authentication.cpp`
-Three functions with explicit client/server boundary:
-
-| Function | Boundary | What it does |
-|----------|----------|-------------|
-| `ComputeClientHash()` | Client | `C = SHA-256(S\|\|P)`, wipes `P` |
-| `VerifyOnServer()` | Server | Validates username, decrypts `E→B⊕R` via `MlKemDecrypt`, recovers `B=(B⊕R)⊕R`, decrypts `ED→D`, recomputes `D'`, constant-time compare, wipes all intermediates |
-| `AuthenticateUser()` | Wrapper | `ComputeClientHash` + `VerifyOnServer` |
-
----
-
-## Security Properties
-
-| Property | How |
-|----------|-----|
-| Password never transmitted | Only `C = H(S,P)` crosses wire |
-| Password never stored server-side | Server holds only `{R, E, ED}` |
-| Device compromise does not expose B | B unrecoverable from E without server-held R |
-| Post-quantum asymmetric encryption | ML-KEM-768 + AES-256-GCM hybrid (FIPS 203) |
-| Timing-safe comparison | `CRYPTO_memcmp` |
-| Memory wiped after use | `OPENSSL_cleanse` on all intermediates |
-| CSPRNG | `RAND_bytes` for `S`, `B`, and `R` |
-| Username mismatch rejected | `VerifyOnServer` checks `server_record.username == username` |
-| Split-knowledge | Offline attack requires simultaneous device + server breach |
-
----
-
-## Current Status
-
-The cryptographic registration and authentication protocol is implemented, and the Qt desktop application now includes Auth gating and a persistent Password Manager vault. Auth records remain in memory for the current application run; the application does not yet separate client and server over a real network.
-
-### Authentication and feature access
-
-- Registration rejects a username already registered in the current run.
-- Registration passwords require at least eight Unicode characters, one ASCII uppercase letter, one ASCII lowercase letter, one digit, and one ASCII punctuation character.
-- Password Manager and QR Sync stay hidden until a successful login. Registering alone does not reveal them.
-- QR Sync source and behavior were not changed as part of this work.
+Registration passwords need at least eight Unicode code points, an ASCII uppercase letter, an ASCII lowercase letter, a digit, and an ASCII punctuation character.
 
 ### Password Manager
 
-- The first visit asks the user to set a master password. After setup, the app shows the credential-add workflow.
-- Credentials contain the entered website URL, username, and password. The vault is encrypted with the existing Argon2id and AES-256-GCM implementation and stored in the app-specific data directory as `password-vault.dat`.
-- Website URLs are kept in a plaintext index so the site list remains searchable while locked. Usernames and passwords are encrypted.
-- The first reveal in a session asks for the master password. Revealed credentials remain available for ten minutes from that first successful unlock; activity does not extend the session.
-- Username and password have separate copy actions. The website action opens valid HTTP(S) URLs through the system handler. Clipboard contents are not cleared automatically.
-- The vault is device-local and is not partitioned by Auth username. Auth accounts and records are still in-memory only.
+The website index remains searchable while the vault is locked. Credential contents are encrypted in the vault file.
 
-### Android
-
-The Qt Widgets application builds as an arm64-v8a debug APK. The Android minimum and target SDK versions are 30; this environment uses compile SDK 37. The package identifier is `org.tmps.auth`. The default Makefile build directory is `build_android_arm64`.
-
-## Prerequisites
-
-For a desktop build:
-
-- CMake 3.20 or newer
-- C++17 compiler
-- vcpkg with the project manifest dependencies
-- Qt 6 Widgets/Core/Gui for the desktop UI
-
-For Android, also install a Qt 6.12 Android arm64 kit and matching Qt host kit, Android SDK/build tools, Android NDK, and Gradle. The example command below uses the paths installed in this development environment; override them for your machine.
-
-## Build and run
-
-Configure and build the desktop Qt app:
-
-```bash
-cmake -B build -S . \
-  -DCMAKE_TOOLCHAIN_FILE="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-  -DVCPKG_TARGET_TRIPLET=x64-linux
-cmake --build build --target AuthQt -j2
+```mermaid
+flowchart TD
+    A[Open Password Manager] --> B{Vault file exists?}
+    B -->|No| C[Set master password]
+    C --> D[Generate vault salt and derive key]
+    D --> E[Encrypt empty vault and save file]
+    E --> F[Show Add Credential]
+    B -->|Yes| G[Load vault metadata and website index]
+    G --> H[Show searchable website list while locked]
+    H --> I{Choose action}
+    I -->|Search| H
+    I -->|Add credential| J{Key available for this operation?}
+    J -->|No| K[Request master password]
+    K --> L[Derive key and decrypt vault]
+    L -->|Wrong password or damaged file| M[Keep vault locked and report error]
+    L -->|Success| N[Validate URL and save encrypted credential]
+    J -->|Yes| N
+    I -->|Select website| O{Viewing session unlocked?}
+    O -->|No| P[Request master password]
+    P --> Q[Derive key and decrypt entries]
+    Q -->|Failure| M
+    Q -->|Success| R[Start ten-minute reveal session]
+    O -->|Yes| S[Show credentials for selected website]
+    R --> S
+    S --> T[Copy username or password, or open website]
+    S --> U{Ten minutes elapsed?}
+    U -->|No| S
+    U -->|Yes| V[Clear credential views, entries, and key]
+    V --> H
 ```
 
-Build all desktop targets with `make build`. Run the GUI with `make ui`, the console demonstration with `make demo`, and the existing GTest suite with `make test` or `ctest --test-dir build --output-on-failure`.
+### Android APK build
 
-The test suite covers the protocol library; it does not currently exercise the Qt Auth or Password Manager flows.
+`make android` checks Android packaging prerequisites, configures the arm64-v8a build, and asks Qt and Gradle to produce the debug APK. The default `make` target checks both desktop and Android requirements, then builds desktop followed by Android.
 
-## Build the Android APK
-
-The Make target configures the arm64-v8a vcpkg triplet, builds OpenSSL, liboqs, and Argon2 for Android, then invokes Qt's APK packaging target:
-
-```bash
-make android \
-  ANDROID_NDK=/opt/android-ndk/android-ndk-r30 \
-  ANDROID_SDK_ROOT="$HOME/Android/Sdk" \
-  QT_ANDROID_PREFIX=/home/s-uryansh/Qt/6.12.0/android_arm64_v8a \
-  QT_HOST_PREFIX=/home/s-uryansh/Qt/6.12.0/gcc_64
+```mermaid
+flowchart TD
+    A[make android] --> B[Check Android prerequisites]
+    B -->|Missing or misconfigured| C[Print all failed checks and stop]
+    B -->|All pass| D[Configure CMake with Android NDK and Qt kit]
+    D --> E[Build AuthQt for arm64-v8a]
+    E --> F[Qt prepares Android package]
+    F --> G[Gradle assembles debug APK]
+    G --> H[Write android-build-debug.apk]
 ```
 
-`ANDROID_NDK` and `ANDROID_SDK_ROOT` are required. `QT_ANDROID_PREFIX` defaults to `/home/s-uryansh/Qt/6.12.0/android_arm64_v8a`, and `QT_HOST_PREFIX` defaults to `/home/s-uryansh/Qt/6.12.0/gcc_64`; override both when Qt is installed elsewhere. `VCPKG_ROOT` can also be supplied if vcpkg is not at `~/vcpkg`. Set `ANDROID_BUILD_DIR` to use a different build directory.
+### Make target routing
 
-The debug APK is written to:
+Each target runs only the prerequisite checks needed for its work. `help` and cleanup targets stay available even when a build toolchain is missing.
 
-```text
-build_android_arm64/android-build/build/outputs/apk/debug/android-build-debug.apk
+```mermaid
+flowchart TD
+    A[Run make target] --> B{Target}
+    B -->|build, ui, demo| C[Check desktop prerequisites]
+    C -->|Failed| X[Report all missing items and stop]
+    C -->|Passed| D[Configure and build desktop]
+    D -->|ui target| E[Launch Qt application]
+    D -->|demo target| F[Run console demo]
+    B -->|test| G[Check desktop and CTest prerequisites]
+    G -->|Failed| X
+    G -->|Passed| H[Build desktop and run CTest suites]
+    B -->|android| I[Check Android packaging prerequisites]
+    I -->|Failed| X
+    I -->|Passed| J[Configure and package Android APK]
+    B -->|all| K[Check desktop and Android prerequisites]
+    K -->|Failed| X
+    K -->|Passed| L[Build desktop, then Android APK]
+    B -->|help, clean, android-clean| M[Run help or cleanup directly]
 ```
 
-This target builds a debug APK for local installation. A production release requires release signing configuration.
+## Build requirements
 
-## Further documentation
+Desktop builds require CMake 3.20 or newer, a C++17 compiler, Git, vcpkg and the manifest dependencies, Qt 6 Core/Gui/Widgets and its Qt Svg CMake dependency, and the host GTest package. Android packaging also needs a Qt Android arm64 kit with those Qt modules, the Qt host deployment tool, Java, an Android NDK, and an SDK with API 30 or newer plus Android build-tools. The Qt kit provides the Gradle wrapper; its user cache must be writable. System-wide Gradle and `adb` are not used by these targets.
 
-- [Design spec](docs/superpowers/specs/2026-10-19-auth-password-manager-android-design.md)
-- [Auth registration and feature gating plan](docs/superpowers/plans/2026-10-19-auth-registration-gating.md)
-- [Password Manager vault plan](docs/superpowers/plans/2026-10-19-password-manager-vault.md)
-- [Android APK plan](docs/superpowers/plans/2026-10-19-android-apk.md)
+The preflight checks installed paths locally and reports all missing requirements for the selected target with `✗` diagnostics. Install or configure the missing item before retrying. It does not check network availability; vcpkg may need network access when dependencies are first installed.
+
+## Path and tool overrides
+
+The Makefile uses local defaults that can be overridden on the command line or through the environment.
+
+| Variable | Default |
+| --- | --- |
+| `VCPKG_ROOT` | `$HOME/vcpkg` |
+| `TOOLCHAIN` | `$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake` |
+| `VCPKG_INSTALLED_DIR` | `vcpkg_installed/x64-linux` in this checkout |
+| `QT_HOST_PREFIX` | `/home/s-uryansh/Qt/6.12.0/gcc_64` |
+| `QT_ANDROID_PREFIX` | `/home/s-uryansh/Qt/6.12.0/android_arm64_v8a` |
+| `ANDROID_NDK` | `ANDROID_NDK_HOME`, then `ANDROID_NDK_ROOT` |
+| `ANDROID_SDK_ROOT` | `$HOME/Android/Sdk` |
+| `GRADLE_USER_HOME` | `$HOME/.gradle` |
+| `BUILD_DIR` | `build` |
+| `ANDROID_BUILD_DIR` | `build_android_arm64` |
+| `CMAKE_BIN`, `CXX_BIN`, `CTEST_BIN` | `cmake`, `c++`, `ctest` |
+
+Git and Java are found on `PATH`; Java can also be selected with `JAVA_HOME`. If the default Gradle cache is not writable, set `GRADLE_USER_HOME` to a writable directory. Example: `make android ANDROID_NDK=/path/to/ndk ANDROID_SDK_ROOT=/path/to/sdk`.
+
+## Outputs
+
+- Desktop Qt application: `build/AuthQt`
+- Console demo: `build/AuthUI`
+- Android debug APK: `build_android_arm64/android-build/build/outputs/apk/debug/android-build-debug.apk`
+
+The Android APK uses arm64-v8a with minimum and target SDK 30. It is a debug package and is not configured for Play Store release signing.

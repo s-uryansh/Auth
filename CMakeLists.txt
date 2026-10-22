@@ -20,6 +20,7 @@ target_compile_options(AuthLib PRIVATE ${STRICT_CXX_FLAGS})
 set(AUTH_QT_SOURCES
   ui/main.cpp ui/AuthTab.cpp ui/AuthTab.h ui/MainWindow.cpp ui/MainWindow.h
   ui/PasswordManagerTab.cpp ui/PasswordManagerTab.h
+  ui/SensitiveData.cpp ui/SensitiveData.h
   ui/PasswordVaultFileStore.cpp ui/PasswordVaultFileStore.h
   ui/QRSyncTab.cpp ui/QRSyncTab.h)
 
@@ -58,6 +59,24 @@ else()
   enable_testing()
   add_test(NAME AuthUnitTests COMMAND AuthTests)
 
+  add_executable(SensitiveDataTests tests/test_sensitive_data.cpp ui/SensitiveData.cpp)
+  target_include_directories(SensitiveDataTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(SensitiveDataTests PRIVATE Qt6::Core OpenSSL::Crypto GTest::gtest_main)
+  target_compile_options(SensitiveDataTests PRIVATE ${STRICT_CXX_FLAGS})
+  add_test(NAME SensitiveDataTests COMMAND SensitiveDataTests)
+
+  add_executable(VaultStorageTests
+    tests/test_vault_storage.cpp
+    ui/PasswordVaultFileStore.cpp
+    ui/PasswordVaultFileStore.h)
+  target_include_directories(VaultStorageTests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui)
+  target_link_libraries(VaultStorageTests PRIVATE
+    AuthLib Qt6::Core GTest::gtest_main)
+  target_compile_options(VaultStorageTests PRIVATE ${STRICT_CXX_FLAGS})
+  add_test(NAME VaultStorageTests COMMAND VaultStorageTests)
+
   add_custom_target(LSanCheck
     COMMAND ${CMAKE_COMMAND} -E env "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp" ${CMAKE_BINARY_DIR}/AuthUI
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -68,5 +87,4 @@ else()
   target_link_libraries(AuthQt PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui AuthLib OQS::oqs)
   target_compile_options(AuthQt PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
   target_link_options(AuthQt PRIVATE ${SANITIZER_FLAGS})
-  add_test(NAME AuthQtApp COMMAND AuthQt)
 endif()

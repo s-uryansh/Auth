@@ -1168,29 +1168,21 @@ TEST_P(VaultFixture, Argon2KeyDerivation) {
 }
 
 TEST_P(VaultFixture, VaultEncryptDecryptRoundTrip) {
-  // Test vault encryption and decryption
-  DB db;
-  std::string user = "vault_user_" + std::to_string(GetParam());
-  std::string pass = "vault_pass_" + std::to_string(GetParam());
-  auto rp = Pw(pass);
-  auto pl = TimedRegister(user, rp, db);
-
-  // Create a vault entry
+  const std::vector<uint8_t> key(32, static_cast<uint8_t>(GetParam() + 1));
   auth::VaultEntry entry;
   entry.website = "example.com";
-  entry.username = user;
-  entry.password = std::vector<uint8_t>(pass.begin(), pass.end());
-  entry.salt = db[user];  // use the registration salt
+  entry.username = "vault-user-" + std::to_string(GetParam());
+  entry.password = {0x00, 0x01, 0xFF};
+  entry.salt = std::vector<uint8_t>(auth::kSaltSize, 0xA5);
+  const std::vector<auth::VaultEntry> entries = {entry};
 
-  std::vector<auth::VaultEntry> entries = {entry};
-
-  // Derive key and encrypt
-  std::vector<uint8_t> master_pw(pass.begin(), pass.end());
-  // Note: This test verifies the vault functions compile and link correctly.
-  // Full round-trip testing requires a master password, which is handled
-  // by the Qt UI component (PasswordManagerTab).
-  (void)entry;
-  (void)master_pw;
+  const auto encrypted = auth::EncryptVault(key, entries);
+  const auto decrypted = auth::DecryptVault(key, encrypted);
+  ASSERT_EQ(decrypted.size(), 1u);
+  EXPECT_EQ(decrypted[0].website, entry.website);
+  EXPECT_EQ(decrypted[0].username, entry.username);
+  EXPECT_EQ(decrypted[0].password, entry.password);
+  EXPECT_EQ(decrypted[0].salt, entry.salt);
 }
 
 TEST_P(VaultFixture, VaultEntrySerialization) {
@@ -1218,6 +1210,102 @@ TEST_P(VaultFixture, VaultEntrySerialization) {
   EXPECT_EQ(deserialized[0].salt[1], 0xBB);
   EXPECT_EQ(deserialized[0].salt[2], 0xCC);
   EXPECT_EQ(deserialized[0].salt[3], 0xDD);
+}
+
+TEST(VaultCompatibilityTest, PreservesSerializedBytesAndEncryptedLayout) {
+  auth::VaultEntry entry;
+  entry.website = "example.com";
+  entry.username = "testuser";
+  entry.password = {0x01, 0x02, 0x03, 0x04};
+  entry.salt = {0xAA, 0xBB, 0xCC, 0xDD};
+  const std::vector<auth::VaultEntry> entries = {entry};
+
+  const std::vector<std::uint8_t> expected_serialized = {
+      0x00, 0x00, 0x00, 0x01,  // entry count
+      0x00, 0x00, 0x00, 0x0B,  // website length
+      'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm',
+      0x00, 0x00, 0x00, 0x08,  // username length
+      't', 'e', 's', 't', 'u', 's', 'e', 'r',
+      0x00, 0x00, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04,
+      0x00, 0x00, 0x00, 0x04, 0xAA, 0xBB, 0xCC, 0xDD};
+  const std::vector<std::uint8_t> serialized = auth::SerializeVault(entries);
+  EXPECT_EQ(serialized, expected_serialized);
+  EXPECT_EQ(auth::SerializeVault(auth::DeserializeVault(serialized)), serialized);
+
+  const std::vector<std::uint8_t> key(32, 0x5A);
+  const std::vector<std::uint8_t> encrypted = auth::EncryptVault(key, entries);
+  EXPECT_EQ(encrypted.size(), 12 + 16 + serialized.size());
+  const std::vector<auth::VaultEntry> decrypted = auth::DecryptVault(key, encrypted);
+  ASSERT_EQ(decrypted.size(), 1u);
+  EXPECT_EQ(decrypted[0].website, entry.website);
+  EXPECT_EQ(decrypted[0].username, entry.username);
+  EXPECT_EQ(decrypted[0].password, entry.password);
+  EXPECT_EQ(decrypted[0].salt, entry.salt);
+}
+
+TEST(RegistrationInputTest, ExplicitServerNonceIsPreservedAndAuthenticates) {
+  DB db;
+  const std::string username = "explicit_nonce_user";
+  const std::vector<uint8_t> server_nonce(16, 0xA7);
+  auto registration_password = Pw("ExplicitNoncePass1!");
+  const auto payload = auth::RegisterUser(username, registration_password,
+                                           server_nonce, db);
+
+  EXPECT_EQ(payload.server_nonce_r, server_nonce);
+  EXPECT_TRUE(db.count(username));
+  EXPECT_EQ(db.at(username).size(), auth::kSaltSize);
+  auto login_password = Pw("ExplicitNoncePass1!");
+  EXPECT_TRUE(auth::AuthenticateUser(username, login_password, db.at(username),
+                                     payload));
+}
+
+TEST(RegistrationInputTest, RejectsServerNoncesWithWrongLength) {
+  for (const std::size_t nonce_length : {0u, 1u, 15u, 17u, 32u}) {
+    DB db;
+    auto password = Pw("ExplicitNoncePass1!");
+    const std::vector<uint8_t> nonce(nonce_length, 0x11);
+    EXPECT_THROW(auth::RegisterUser("invalid_nonce", password, nonce, db),
+                 std::runtime_error);
+    EXPECT_TRUE(db.empty());
+  }
+}
+
+TEST(AuthenticationInputTest, WrongUsernameWipesClientHash) {
+  DB db;
+  auto registration_password = Pw("ServerRecordPass1!");
+  const auto payload = auth::RegisterUser("server_record_user",
+                                           registration_password, db);
+  std::vector<uint8_t> hash(32, 0x5A);
+  EXPECT_FALSE(auth::VerifyOnServer("different_user", hash, payload));
+  EXPECT_TRUE(std::all_of(hash.begin(), hash.end(),
+                          [](uint8_t byte) { return byte == 0; }));
+}
+
+TEST(AuthenticationInputTest, RejectsWrongLengthNonceAndWipesHash) {
+  DB db;
+  auto registration_password = Pw("ServerRecordPass2!");
+  auto payload = auth::RegisterUser("bad_nonce_record",
+                                     registration_password, db);
+  payload.server_nonce_r.pop_back();
+  std::vector<uint8_t> hash(32, 0x5A);
+  EXPECT_THROW(auth::VerifyOnServer("bad_nonce_record", hash, payload),
+               std::runtime_error);
+  EXPECT_TRUE(std::all_of(hash.begin(), hash.end(),
+                          [](uint8_t byte) { return byte == 0; }));
+}
+
+TEST(AuthenticationInputTest, RejectsTruncatedEncryptedRecord) {
+  DB db;
+  auto registration_password = Pw("TruncatedRecordPass3!");
+  auto payload = auth::RegisterUser("truncated_record_user",
+                                     registration_password, db);
+  payload.encrypted_secret_e.resize(16);
+  auto login_password = Pw("TruncatedRecordPass3!");
+  EXPECT_THROW(auth::AuthenticateUser("truncated_record_user", login_password,
+                                      db.at("truncated_record_user"), payload),
+               std::runtime_error);
+  EXPECT_TRUE(std::all_of(login_password.begin(), login_password.end(),
+                          [](uint8_t byte) { return byte == 0; }));
 }
 
 // ---

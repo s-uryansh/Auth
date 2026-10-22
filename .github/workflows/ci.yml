@@ -6,14 +6,26 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          target: desktop
+
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
 
       - name: Configure CMake
-        run: cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake
+        run: >-
+          cmake -B build -S .
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-linux
+          -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
 
       - name: Build
         run: cmake --build build --config Release
 
       - name: Run Tests
         run: ctest --test-dir build --output-on-failure
+        env:
+          QT_QPA_PLATFORM: offscreen

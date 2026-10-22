@@ -6,6 +6,8 @@
 #include <QSaveFile>
 #include <QtEndian>
 
+#include "auth/crypto_utils.hpp"
+
 #include <stdexcept>
 #include <utility>
 
@@ -18,6 +20,8 @@ constexpr quint32 kMaximumWebsiteCount = 10000;
 constexpr qsizetype kMaximumWebsiteLength = 4096;
 constexpr quint32 kMaximumCiphertextSize =
     static_cast<quint32>(kMaximumVaultFileSize);
+constexpr quint32 kMinimumVaultCiphertextSize = static_cast<quint32>(
+    auth::internal::kAesGcmIvBytes + auth::internal::kAesGcmTagBytes);
 
 void configureStream(QDataStream &stream) {
     stream.setVersion(QDataStream::Qt_6_0);
@@ -75,7 +79,8 @@ void validateEncodedLengths(const QByteArray &bytes) {
     }
 
     quint32 ciphertext_length = 0;
-    if (!readLength(bytes, offset, ciphertext_length) || ciphertext_length < 28 ||
+    if (!readLength(bytes, offset, ciphertext_length) ||
+        ciphertext_length < kMinimumVaultCiphertextSize ||
         ciphertext_length > kMaximumCiphertextSize ||
         bytes.size() - offset != static_cast<qsizetype>(ciphertext_length)) {
         throw std::runtime_error("Password vault ciphertext encoding is invalid");
@@ -89,7 +94,7 @@ void validateVault(const PasswordVaultFile &vault) {
         vault.params.memory_cost_kb != supported.memory_cost_kb ||
         vault.params.time_cost != supported.time_cost ||
         vault.params.parallelism != supported.parallelism ||
-        vault.ciphertext.size() < 28 ||
+        vault.ciphertext.size() < kMinimumVaultCiphertextSize ||
         vault.websites.size() > static_cast<qsizetype>(kMaximumWebsiteCount)) {
         throw std::runtime_error("Invalid password vault metadata");
     }

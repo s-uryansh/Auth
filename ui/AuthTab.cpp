@@ -1,4 +1,5 @@
 #include "AuthTab.h"
+#include "SensitiveData.h"
 #include "auth/Authentication.hpp"
 #include "auth/Registration.hpp"
 
@@ -9,7 +10,6 @@
 #include <QMessageBox>
 
 #include <openssl/rand.h>
-#include <openssl/crypto.h>
 
 #include <stdexcept>
 
@@ -41,13 +41,6 @@ static QString registrationPasswordError(const QString &password) {
     }
 
     return {};
-}
-
-static std::vector<uint8_t> secureInput(const QString &text) {
-    std::string s = text.toStdString();
-    std::vector<uint8_t> v(s.begin(), s.end());
-    OPENSSL_cleanse(&s[0], s.size());
-    return v;
 }
 
 static std::vector<uint8_t> generateNonce(size_t bytes = 16) {
@@ -122,7 +115,7 @@ void AuthTab::onRegisterClicked() {
 
     try {
         std::vector<uint8_t> server_r = generateNonce();
-        std::vector<uint8_t> pw = secureInput(pass);
+        std::vector<uint8_t> pw = ui::secureInputBytes(pass);
 
         auth::RegistrationPayload payload =
             auth::RegisterUser(username, pw, server_r, user_db_);
@@ -154,7 +147,7 @@ void AuthTab::onLoginClicked() {
     }
 
     try {
-        std::vector<uint8_t> pw = secureInput(pass);
+        std::vector<uint8_t> pw = ui::secureInputBytes(pass);
         bool ok = auth::AuthenticateUser(
             user.toStdString(), pw,
             user_db_[user.toStdString()],
