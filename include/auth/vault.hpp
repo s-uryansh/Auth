@@ -40,9 +40,19 @@ std::vector<uint8_t> EncryptVault(
     const std::vector<uint8_t>& key,
     const std::vector<VaultEntry>& entries);
 
+std::vector<uint8_t> EncryptVault(
+    const std::vector<uint8_t>& key,
+    const std::vector<VaultEntry>& entries,
+    const std::vector<uint8_t>& aad);
+
 std::vector<VaultEntry> DecryptVault(
     const std::vector<uint8_t>& key,
     const std::vector<uint8_t>& ciphertext);
+
+std::vector<VaultEntry> DecryptVault(
+    const std::vector<uint8_t>& key,
+    const std::vector<uint8_t>& ciphertext,
+    const std::vector<uint8_t>& aad);
 
 std::vector<uint8_t> SerializeVault(const std::vector<VaultEntry>& entries);
 

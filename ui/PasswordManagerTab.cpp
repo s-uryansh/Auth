@@ -148,6 +148,7 @@ PasswordManagerTab::PasswordManagerTab(QWidget *parent)
 
     store_ = std::make_unique<PasswordVaultFileStore>(
         app_data + "/password-vault.dat");
+    workflow_ = std::make_unique<PasswordVaultWorkflow>(*store_, protocol_store_);
     if (!store_->exists()) {
         pages_->setCurrentWidget(setup_page_);
         updateStatus("Set a master password to create your vault");
@@ -225,7 +226,8 @@ void PasswordManagerTab::onSetupClicked() {
         vault.params = auth::kDefaultArgon2Params;
         std::vector<uint8_t> key = deriveKeyFromText(master, vault.salt,
                                                      vault.params);
-        vault.ciphertext = auth::EncryptVault(key, {});
+        vault.ciphertext = auth::EncryptVault(
+            key, {}, store_->authenticatedData(vault));
         store_->save(vault);
 
         ui::wipeBytes(active_key_);
@@ -260,6 +262,14 @@ void PasswordManagerTab::onAddClicked() {
         return;
     }
 
+    QString canonical_website;
+    try {
+        canonical_website = normalizedWebsite(website);
+    } catch (const std::exception &e) {
+        QMessageBox::warning(this, "Invalid Website", QString::fromUtf8(e.what()));
+        return;
+    }
+
     std::vector<uint8_t> operation_key;
     const std::vector<uint8_t> *key = &active_key_;
     if (active_key_.empty()) {
@@ -279,27 +289,20 @@ void PasswordManagerTab::onAddClicked() {
         }
     }
 
-    std::vector<auth::VaultEntry> entries;
     std::vector<uint8_t> credential_password;
     try {
-        vault_file_ = store_->load();
-        entries = auth::DecryptVault(*key, vault_file_.ciphertext);
-        const QString canonical_website = normalizedWebsite(website);
-
-        auth::VaultEntry entry;
-        entry.website = canonical_website.toStdString();
-        entry.username = username.toStdString();
         credential_password = ui::secureInputBytes(password_text);
-        entry.password = credential_password;
-        entries.push_back(std::move(entry));
-
-        PasswordVaultFile updated = vault_file_;
-        updated.ciphertext = auth::EncryptVault(*key, entries);
-        if (!updated.websites.contains(canonical_website)) {
-            updated.websites.push_back(canonical_website);
+        workflow_->saveNewCredential(*key, canonical_website,
+                                     username.toStdString(),
+                                     credential_password);
+        vault_file_ = store_->load();
+        if (viewing_unlocked_) {
+            std::vector<auth::VaultEntry> refreshed_entries = auth::DecryptVault(
+                *key, vault_file_.ciphertext,
+                store_->authenticatedData(vault_file_));
+            clearEntries();
+            entries_ = std::move(refreshed_entries);
         }
-        store_->save(updated);
-        vault_file_ = std::move(updated);
         refreshWebsiteList();
 
         website_input_->clear();
@@ -313,7 +316,6 @@ void PasswordManagerTab::onAddClicked() {
     }
 
     ui::wipeBytes(credential_password);
-    ui::wipeVaultEntries(entries);
     ui::wipeBytes(operation_key);
 }
 
@@ -334,12 +336,13 @@ bool PasswordManagerTab::unlockForViewing() {
     if (!accepted) return false;
 
     std::vector<uint8_t> candidate_key;
+    std::vector<auth::VaultEntry> decrypted;
     try {
         vault_file_ = store_->load();
         candidate_key = deriveKeyFromText(master, vault_file_.salt,
                                           vault_file_.params);
-        std::vector<auth::VaultEntry> decrypted =
-            auth::DecryptVault(candidate_key, vault_file_.ciphertext);
+        decrypted = workflow_->unlockAndMigrate(candidate_key);
+        vault_file_ = store_->load();
         clearEntries();
         entries_ = std::move(decrypted);
         ui::wipeBytes(active_key_);
@@ -351,6 +354,7 @@ bool PasswordManagerTab::unlockForViewing() {
         return true;
     } catch (const std::exception &e) {
         ui::wipeBytes(candidate_key);
+        ui::wipeVaultEntries(decrypted);
         QMessageBox::warning(this, "Vault Unlock Failed",
                              QString::fromUtf8(e.what()));
         updateStatus("Vault remains locked");
@@ -368,11 +372,22 @@ void PasswordManagerTab::onWebsiteClicked(QListWidgetItem *item) {
 
 void PasswordManagerTab::revealWebsiteCredentials(const QString &website) {
     clearCredentialCards();
+    std::vector<const auth::VaultEntry *> verified_entries;
+    for (const auth::VaultEntry &entry : entries_) {
+        if (QString::fromStdString(entry.website) != website) continue;
+        if (!workflow_->authenticate(entry)) {
+            clearCredentialCards();
+            updateStatus("Protocol 2 verification failed; credentials remain hidden.");
+            return;
+        }
+        verified_entries.push_back(&entry);
+    }
+
     int visible_entries = 0;
 
-    for (const auth::VaultEntry &entry : entries_) {
+    for (const auth::VaultEntry *entry_pointer : verified_entries) {
+        const auth::VaultEntry &entry = *entry_pointer;
         const QString entry_website = QString::fromStdString(entry.website);
-        if (entry_website != website) continue;
 
         auto *card = new QGroupBox(website, credential_cards_widget_);
         auto *form = new QFormLayout(card);

@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "PasswordVaultFileStore.h"
+#include "PasswordVaultWorkflow.h"
+#include "auth/WebsiteCredentialAuth.hpp"
 #include "auth/vault.hpp"
 
 class PasswordManagerTab : public QWidget {
@@ -67,6 +69,8 @@ private:
     QString selected_website_;
 
     std::unique_ptr<PasswordVaultFileStore> store_;
+    std::unique_ptr<PasswordVaultWorkflow> workflow_;
+    auth::WebsiteCredentialAuthStore protocol_store_;
     PasswordVaultFile vault_file_;
     std::vector<uint8_t> active_key_;
     std::vector<auth::VaultEntry> entries_;

@@ -1,11 +1,14 @@
 #include "auth/vault.hpp"
 #include "PasswordVaultFileStore.h"
 
+#include <QDataStream>
 #include <QFile>
 #include <QTemporaryDir>
 #include <QtEndian>
 
 #include <gtest/gtest.h>
+
+#include <openssl/evp.h>
 
 #include <cstdint>
 #include <stdexcept>
@@ -22,6 +25,38 @@ auth::VaultEntry makeEntry(const std::string &website,
     return {website, username, std::move(password), std::move(salt)};
 }
 
+std::vector<uint8_t> encryptLegacyVaultWithoutAad(
+    const std::vector<uint8_t> &key,
+    const std::vector<auth::VaultEntry> &entries) {
+    const std::vector<uint8_t> plaintext = auth::SerializeVault(entries);
+    const std::vector<uint8_t> nonce(12, 0x42);
+    std::vector<uint8_t> ciphertext(plaintext.size());
+    std::vector<uint8_t> tag(16);
+    EVP_CIPHER_CTX *context = EVP_CIPHER_CTX_new();
+    if (context == nullptr) throw std::runtime_error("Could not create test cipher");
+    int output_length = 0;
+    int final_length = 0;
+    const bool ok =
+        EVP_EncryptInit_ex(context, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+        EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_SET_IVLEN,
+                            static_cast<int>(nonce.size()), nullptr) == 1 &&
+        EVP_EncryptInit_ex(context, nullptr, nullptr, key.data(), nonce.data()) == 1 &&
+        EVP_EncryptUpdate(context, ciphertext.data(), &output_length,
+                          plaintext.data(), static_cast<int>(plaintext.size())) == 1 &&
+        EVP_EncryptFinal_ex(context, ciphertext.data() + output_length,
+                            &final_length) == 1 &&
+        EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_GET_TAG,
+                            static_cast<int>(tag.size()), tag.data()) == 1;
+    EVP_CIPHER_CTX_free(context);
+    if (!ok) throw std::runtime_error("Could not create legacy test ciphertext");
+    ciphertext.resize(static_cast<size_t>(output_length + final_length));
+    std::vector<uint8_t> blob;
+    blob.insert(blob.end(), nonce.begin(), nonce.end());
+    blob.insert(blob.end(), tag.begin(), tag.end());
+    blob.insert(blob.end(), ciphertext.begin(), ciphertext.end());
+    return blob;
+}
+
 PasswordVaultFile makeVaultFile() {
     PasswordVaultFile vault;
     vault.salt = std::vector<std::uint8_t>(auth::kSaltSize, 0x31);
@@ -33,6 +68,33 @@ PasswordVaultFile makeVaultFile() {
 
 void replaceBigEndian32(QByteArray &bytes, qsizetype offset, quint32 value) {
     qToBigEndian(value, reinterpret_cast<uchar *>(bytes.data() + offset));
+}
+
+void replaceBigEndian16(QByteArray &bytes, qsizetype offset, quint16 value) {
+    qToBigEndian(value, reinterpret_cast<uchar *>(bytes.data() + offset));
+}
+
+void writeVaultFile(const QString &path, const PasswordVaultFile &vault,
+                    quint16 version) {
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        throw std::runtime_error("Could not create test vault file");
+    }
+    QDataStream stream(&file);
+    stream.setVersion(QDataStream::Qt_6_0);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << quint32(0x41555448) << version
+           << vault.params.memory_cost_kb << vault.params.time_cost
+           << vault.params.parallelism << vault.params.key_length
+           << QByteArray(reinterpret_cast<const char *>(vault.salt.data()),
+                         static_cast<qsizetype>(vault.salt.size()))
+           << static_cast<quint32>(vault.websites.size());
+    for (const QString &website : vault.websites) stream << website;
+    stream << QByteArray(reinterpret_cast<const char *>(vault.ciphertext.data()),
+                         static_cast<qsizetype>(vault.ciphertext.size()));
+    if (stream.status() != QDataStream::Ok) {
+        throw std::runtime_error("Could not encode test vault file");
+    }
 }
 
 } // namespace
@@ -143,6 +205,42 @@ TEST(VaultCryptoTest, EncryptsAndDecryptsMultipleEntries) {
     EXPECT_EQ(decrypted[1].salt, entries[1].salt);
 }
 
+TEST(VaultCryptoTest, AuthenticatesAADAndNonce) {
+    const std::vector<std::uint8_t> key(32, 0x5A);
+    const std::vector<auth::VaultEntry> entries = {
+        makeEntry("https://example.com", "alice", {0x01, 0x02},
+                  {0x10, 0x11})};
+    const std::vector<std::uint8_t> aad = {0x02, 0x00, 0x00, 0x01, 0x7F};
+    const auto ciphertext = auth::EncryptVault(key, entries, aad);
+
+    const auto decrypted = auth::DecryptVault(key, ciphertext, aad);
+    ASSERT_EQ(decrypted.size(), 1u);
+    EXPECT_EQ(decrypted[0].password, entries[0].password);
+    EXPECT_EQ(decrypted[0].salt, entries[0].salt);
+
+    auto modified_aad = aad;
+    modified_aad[0] ^= 0x01;
+    EXPECT_THROW(auth::DecryptVault(key, ciphertext, modified_aad),
+                 std::runtime_error);
+
+    auto modified_nonce = ciphertext;
+    modified_nonce[0] ^= 0x01;
+    EXPECT_THROW(auth::DecryptVault(key, modified_nonce, aad),
+                 std::runtime_error);
+}
+
+TEST(VaultCryptoTest, DecryptsLegacyCiphertextWithoutAuthenticatedData) {
+    const std::vector<uint8_t> key(32, 0x5A);
+    const std::vector<auth::VaultEntry> entries = {
+        makeEntry("https://legacy.example", "alice", {1, 2, 3}, {4, 5})};
+    const auto ciphertext = encryptLegacyVaultWithoutAad(key, entries);
+
+    const auto decrypted = auth::DecryptVault(key, ciphertext, {});
+
+    ASSERT_EQ(decrypted.size(), 1u);
+    EXPECT_EQ(decrypted[0].password, entries[0].password);
+}
+
 TEST(VaultCryptoTest, RejectsWrongKeyAndTamperedCiphertext) {
     const std::vector<std::uint8_t> key(32, 0x5A);
     const std::vector<auth::VaultEntry> entries = {
@@ -192,6 +290,112 @@ TEST(PasswordVaultFileStoreTest, SavesAndLoadsVaultMetadataAndWebsiteIndex) {
     EXPECT_EQ(loaded.params.key_length, expected.params.key_length);
     EXPECT_EQ(loaded.ciphertext, expected.ciphertext);
     EXPECT_EQ(loaded.websites, expected.websites);
+    EXPECT_EQ(loaded.format_version, 2);
+    EXPECT_FALSE(store.authenticatedData(loaded).empty());
+}
+
+TEST(PasswordVaultFileStoreTest, LoadsV1FilesWithoutMetadataAad) {
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    const QString path = directory.filePath("legacy-vault.dat");
+    const PasswordVaultFileStore store(path);
+    const std::vector<std::uint8_t> key(32, 0x5A);
+    const std::vector<auth::VaultEntry> entries = {
+        makeEntry("https://legacy.example", "legacy-user", {1, 2, 3}, {})};
+    PasswordVaultFile legacy = makeVaultFile();
+    legacy.ciphertext = auth::EncryptVault(key, entries);
+    writeVaultFile(path, legacy, 1);
+
+    const PasswordVaultFile loaded = store.load();
+    EXPECT_EQ(loaded.format_version, 1);
+    EXPECT_TRUE(store.authenticatedData(loaded).empty());
+    const auto decrypted = auth::DecryptVault(key, loaded.ciphertext,
+                                              store.authenticatedData(loaded));
+    ASSERT_EQ(decrypted.size(), 1u);
+    EXPECT_EQ(decrypted[0].username, "legacy-user");
+}
+
+TEST(PasswordVaultFileStoreTest, MetadataChangesInvalidateV2Ciphertext) {
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    const QString path = directory.filePath("authenticated-vault.dat");
+    const PasswordVaultFileStore store(path);
+    const std::vector<std::uint8_t> key(32, 0x5A);
+    const std::vector<auth::VaultEntry> entries = {
+        makeEntry("https://one.example", "one", {1, 2, 3}, {4, 5})};
+    PasswordVaultFile original = makeVaultFile();
+    original.websites = {"https://one.example", "https://two.example"};
+    original.ciphertext = auth::EncryptVault(
+        key, entries, store.authenticatedData(original));
+    store.save(original);
+    const PasswordVaultFile loaded = store.load();
+
+    auto expectTamperedMetadataRejected = [&](PasswordVaultFile changed) {
+        EXPECT_THROW(auth::DecryptVault(
+                         key, loaded.ciphertext,
+                         store.authenticatedData(changed)),
+                     std::runtime_error);
+    };
+    auto changed = loaded;
+    changed.format_version = 1;
+    expectTamperedMetadataRejected(changed);
+    changed = loaded;
+    ++changed.params.memory_cost_kb;
+    expectTamperedMetadataRejected(changed);
+    changed = loaded;
+    ++changed.params.time_cost;
+    expectTamperedMetadataRejected(changed);
+    changed = loaded;
+    ++changed.params.parallelism;
+    expectTamperedMetadataRejected(changed);
+    changed = loaded;
+    ++changed.params.key_length;
+    expectTamperedMetadataRejected(changed);
+    changed = loaded;
+    changed.salt[0] ^= 0x01;
+    expectTamperedMetadataRejected(changed);
+    changed = loaded;
+    changed.websites[0].swap(changed.websites[1]);
+    expectTamperedMetadataRejected(changed);
+    changed = loaded;
+    changed.websites[0] = "https://changed.example";
+    expectTamperedMetadataRejected(changed);
+    changed = loaded;
+    changed.websites.removeLast();
+    expectTamperedMetadataRejected(changed);
+
+    const auto valid_entries = auth::DecryptVault(
+        key, loaded.ciphertext, store.authenticatedData(loaded));
+    ASSERT_EQ(valid_entries.size(), 1u);
+}
+
+TEST(PasswordVaultFileStoreTest, SaveRejectsLegacyVersion) {
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    PasswordVaultFileStore store(directory.filePath("vault.dat"));
+    PasswordVaultFile legacy = makeVaultFile();
+    legacy.format_version = 1;
+    EXPECT_THROW(store.save(legacy), std::runtime_error);
+}
+
+TEST(PasswordVaultFileStoreTest, RejectsUnsupportedFileVersion) {
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    const QString path = directory.filePath("vault.dat");
+    PasswordVaultFileStore store(path);
+    store.save(makeVaultFile());
+
+    QFile file(path);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    QByteArray bytes = file.readAll();
+    file.close();
+    ASSERT_GE(bytes.size(), 6);
+    replaceBigEndian16(bytes, 4, 99);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_EQ(file.write(bytes), bytes.size());
+    file.close();
+
+    EXPECT_THROW(store.load(), std::runtime_error);
 }
 
 TEST(PasswordVaultFileStoreTest, MissingAndEmptyFilesAreRejected) {

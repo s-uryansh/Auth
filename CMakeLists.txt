@@ -12,7 +12,8 @@ find_package(OpenSSL REQUIRED)
 find_package(liboqs CONFIG REQUIRED)
 find_package(unofficial-argon2 CONFIG REQUIRED)
 
-add_library(AuthLib src/Registration.cpp src/Authentication.cpp src/vault.cpp)
+add_library(AuthLib src/Registration.cpp src/Authentication.cpp src/vault.cpp
+  src/WebsiteCredentialAuth.cpp)
 target_include_directories(AuthLib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>)
 target_link_libraries(AuthLib PRIVATE OpenSSL::SSL OpenSSL::Crypto OQS::oqs unofficial::argon2::libargon2)
 target_compile_options(AuthLib PRIVATE ${STRICT_CXX_FLAGS})
@@ -20,6 +21,7 @@ target_compile_options(AuthLib PRIVATE ${STRICT_CXX_FLAGS})
 set(AUTH_QT_SOURCES
   ui/main.cpp ui/AuthTab.cpp ui/AuthTab.h ui/MainWindow.cpp ui/MainWindow.h
   ui/PasswordManagerTab.cpp ui/PasswordManagerTab.h
+  ui/PasswordVaultWorkflow.cpp ui/PasswordVaultWorkflow.h
   ui/SensitiveData.cpp ui/SensitiveData.h
   ui/PasswordVaultFileStore.cpp ui/PasswordVaultFileStore.h
   ui/QRSyncTab.cpp ui/QRSyncTab.h)
@@ -76,6 +78,19 @@ else()
     AuthLib Qt6::Core GTest::gtest_main)
   target_compile_options(VaultStorageTests PRIVATE ${STRICT_CXX_FLAGS})
   add_test(NAME VaultStorageTests COMMAND VaultStorageTests)
+
+  add_executable(PasswordManagerWorkflowTests
+    tests/test_password_manager_workflow.cpp
+    ui/PasswordVaultWorkflow.cpp
+    ui/PasswordVaultFileStore.cpp
+    ui/SensitiveData.cpp)
+  target_include_directories(PasswordManagerWorkflowTests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui)
+  target_link_libraries(PasswordManagerWorkflowTests PRIVATE
+    AuthLib Qt6::Core GTest::gtest_main)
+  target_compile_options(PasswordManagerWorkflowTests PRIVATE ${STRICT_CXX_FLAGS})
+  add_test(NAME PasswordManagerWorkflowTests COMMAND PasswordManagerWorkflowTests)
 
   add_custom_target(LSanCheck
     COMMAND ${CMAKE_COMMAND} -E env "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp" ${CMAKE_BINARY_DIR}/AuthUI

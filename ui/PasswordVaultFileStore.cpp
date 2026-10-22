@@ -8,13 +8,15 @@
 
 #include "auth/crypto_utils.hpp"
 
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
 namespace {
 
 constexpr quint32 kVaultFileMagic = 0x41555448; // "AUTH"
-constexpr quint16 kVaultFileVersion = 1;
+constexpr quint16 kLegacyVaultFileVersion = 1;
+constexpr quint16 kVaultFileVersion = 2;
 constexpr qint64 kMaximumVaultFileSize = 64 * 1024 * 1024;
 constexpr quint32 kMaximumWebsiteCount = 10000;
 constexpr qsizetype kMaximumWebsiteLength = 4096;
@@ -39,6 +41,27 @@ std::vector<uint8_t> toBytes(const QByteArray &bytes) {
     return {begin, begin + bytes.size()};
 }
 
+void appendU16(std::vector<uint8_t> &bytes, quint16 value) {
+    bytes.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+    bytes.push_back(static_cast<uint8_t>(value & 0xff));
+}
+
+void appendU32(std::vector<uint8_t> &bytes, quint32 value) {
+    bytes.push_back(static_cast<uint8_t>((value >> 24) & 0xff));
+    bytes.push_back(static_cast<uint8_t>((value >> 16) & 0xff));
+    bytes.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+    bytes.push_back(static_cast<uint8_t>(value & 0xff));
+}
+
+void appendLengthPrefixed(std::vector<uint8_t> &bytes,
+                          const uint8_t *value, size_t length) {
+    if (length > std::numeric_limits<quint32>::max()) {
+        throw std::runtime_error("Password vault authenticated field is too large");
+    }
+    appendU32(bytes, static_cast<quint32>(length));
+    if (length != 0) bytes.insert(bytes.end(), value, value + length);
+}
+
 bool readLength(const QByteArray &bytes, qsizetype &offset, quint32 &length) {
     if (offset < 0 || bytes.size() - offset < 4) return false;
     length = qFromBigEndian<quint32>(
@@ -48,6 +71,15 @@ bool readLength(const QByteArray &bytes, qsizetype &offset, quint32 &length) {
 }
 
 void validateEncodedLengths(const QByteArray &bytes) {
+    if (bytes.size() < 6) {
+        throw std::runtime_error("Password vault file header is truncated");
+    }
+    const quint16 version = qFromBigEndian<quint16>(
+        reinterpret_cast<const uchar *>(bytes.constData() + 4));
+    if (version != kLegacyVaultFileVersion && version != kVaultFileVersion) {
+        throw std::runtime_error("Password vault file version is unsupported");
+    }
+
     qsizetype offset = 22; // magic, version, and four KDF parameters
     quint32 salt_length = 0;
     if (!readLength(bytes, offset, salt_length) || salt_length != auth::kSaltSize ||
@@ -89,7 +121,9 @@ void validateEncodedLengths(const QByteArray &bytes) {
 
 void validateVault(const PasswordVaultFile &vault) {
     const auth::Argon2Params &supported = auth::kDefaultArgon2Params;
-    if (vault.salt.size() != auth::kSaltSize ||
+    if ((vault.format_version != kLegacyVaultFileVersion &&
+         vault.format_version != kVaultFileVersion) ||
+        vault.salt.size() != auth::kSaltSize ||
         vault.params.key_length != supported.key_length ||
         vault.params.memory_cost_kb != supported.memory_cost_kb ||
         vault.params.time_cost != supported.time_cost ||
@@ -148,11 +182,13 @@ PasswordVaultFile PasswordVaultFileStore::load() const {
     stream >> magic >> version >> memory_cost_kb >> time_cost >> parallelism
            >> key_length >> salt >> website_count;
     if (stream.status() != QDataStream::Ok || magic != kVaultFileMagic ||
-        version != kVaultFileVersion || website_count > kMaximumWebsiteCount) {
+        (version != kLegacyVaultFileVersion && version != kVaultFileVersion) ||
+        website_count > kMaximumWebsiteCount) {
         throw std::runtime_error("Password vault file header is invalid");
     }
 
     PasswordVaultFile vault;
+    vault.format_version = version;
     vault.salt = toBytes(salt);
     vault.params = {memory_cost_kb, time_cost, parallelism, key_length};
     vault.websites.reserve(static_cast<qsizetype>(website_count));
@@ -178,6 +214,9 @@ PasswordVaultFile PasswordVaultFileStore::load() const {
 }
 
 void PasswordVaultFileStore::save(const PasswordVaultFile &vault) const {
+    if (vault.format_version != kVaultFileVersion) {
+        throw std::runtime_error("Password vault save requires the current format");
+    }
     validateVault(vault);
 
     QSaveFile file(file_path_);
@@ -187,7 +226,7 @@ void PasswordVaultFileStore::save(const PasswordVaultFile &vault) const {
 
     QDataStream stream(&file);
     configureStream(stream);
-    stream << kVaultFileMagic << kVaultFileVersion
+    stream << kVaultFileMagic << vault.format_version
            << vault.params.memory_cost_kb << vault.params.time_cost
            << vault.params.parallelism << vault.params.key_length
            << toByteArray(vault.salt)
@@ -200,4 +239,29 @@ void PasswordVaultFileStore::save(const PasswordVaultFile &vault) const {
     if (stream.status() != QDataStream::Ok || !file.commit()) {
         throw std::runtime_error("Could not save password vault file");
     }
+}
+
+std::vector<uint8_t> PasswordVaultFileStore::authenticatedData(
+    const PasswordVaultFile &vault) const {
+    if (vault.format_version == kLegacyVaultFileVersion) return {};
+    if (vault.format_version != kVaultFileVersion) {
+        throw std::runtime_error("Password vault file version is unsupported");
+    }
+
+    std::vector<uint8_t> aad;
+    appendU32(aad, kVaultFileMagic);
+    appendU16(aad, vault.format_version);
+    appendU32(aad, vault.params.memory_cost_kb);
+    appendU32(aad, vault.params.time_cost);
+    appendU32(aad, vault.params.parallelism);
+    appendU32(aad, vault.params.key_length);
+    appendLengthPrefixed(aad, vault.salt.data(), vault.salt.size());
+    appendU32(aad, static_cast<quint32>(vault.websites.size()));
+    for (const QString &website : vault.websites) {
+        const QByteArray utf8 = website.toUtf8();
+        appendLengthPrefixed(
+            aad, reinterpret_cast<const uint8_t *>(utf8.constData()),
+            static_cast<size_t>(utf8.size()));
+    }
+    return aad;
 }

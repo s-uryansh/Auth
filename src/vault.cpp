@@ -6,10 +6,45 @@
 #include <openssl/rand.h>
 #include <argon2.h>
 
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
 namespace auth {
+
+namespace {
+
+std::vector<uint8_t> aadWithNonce(const std::vector<uint8_t>& aad,
+                                  const uint8_t* nonce,
+                                  size_t nonce_size) {
+  // Version 1 vaults were encrypted without any AAD. Keep that wire behavior
+  // when callers provide empty metadata; version 2 metadata is always nonempty
+  // and binds both the header and nonce.
+  if (aad.empty()) return {};
+  if (aad.size() > static_cast<size_t>(std::numeric_limits<int>::max()) -
+                       nonce_size) {
+    throw std::runtime_error("Vault authenticated metadata is too large");
+  }
+  std::vector<uint8_t> result;
+  result.reserve(aad.size() + nonce_size);
+  result.insert(result.end(), aad.begin(), aad.end());
+  result.insert(result.end(), nonce, nonce + nonce_size);
+  return result;
+}
+
+class VectorWiper {
+public:
+  explicit VectorWiper(std::vector<uint8_t>& bytes) : bytes_(bytes) {}
+  ~VectorWiper() { OPENSSL_cleanse(bytes_.data(), bytes_.size()); }
+
+  VectorWiper(const VectorWiper&) = delete;
+  VectorWiper& operator=(const VectorWiper&) = delete;
+
+private:
+  std::vector<uint8_t>& bytes_;
+};
+
+}  // namespace
 
 std::vector<uint8_t> GenerateSalt() {
   std::vector<uint8_t> salt(kSaltSize);
@@ -47,14 +82,24 @@ std::vector<uint8_t> DeriveKey(
 std::vector<uint8_t> EncryptVault(
     const std::vector<uint8_t>& key,
     const std::vector<VaultEntry>& entries) {
+  return EncryptVault(key, entries, {});
+}
+
+std::vector<uint8_t> EncryptVault(
+    const std::vector<uint8_t>& key,
+    const std::vector<VaultEntry>& entries,
+    const std::vector<uint8_t>& aad) {
   if (key.size() != 32)
     throw std::runtime_error("Vault encryption key must be 32 bytes");
 
   std::vector<uint8_t> plaintext = SerializeVault(entries);
+  VectorWiper wipe_plaintext(plaintext);
 
   std::vector<uint8_t> iv(internal::kAesGcmIvBytes);
   if (RAND_bytes(iv.data(), static_cast<int>(iv.size())) != 1)
     throw std::runtime_error("RAND_bytes failed generating vault IV");
+  const std::vector<uint8_t> authenticated_data =
+      aadWithNonce(aad, iv.data(), iv.size());
 
   internal::EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new());
   if (!ctx) throw std::runtime_error("EVP_CIPHER_CTX_new failed");
@@ -64,6 +109,14 @@ std::vector<uint8_t> EncryptVault(
                           static_cast<int>(internal::kAesGcmIvBytes), nullptr) != 1 ||
       EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), iv.data()) != 1) {
     throw std::runtime_error("EVP_EncryptInit_ex failed");
+  }
+
+  int aad_len = 0;
+  if (!authenticated_data.empty() &&
+      EVP_EncryptUpdate(ctx.get(), nullptr, &aad_len,
+                        authenticated_data.data(),
+                        static_cast<int>(authenticated_data.size())) != 1) {
+    throw std::runtime_error("EVP_EncryptUpdate authenticated data failed");
   }
 
   std::vector<uint8_t> ciphertext(plaintext.size());
@@ -94,13 +147,19 @@ std::vector<uint8_t> EncryptVault(
   result.insert(result.end(), tag.begin(), tag.end());
   result.insert(result.end(), ciphertext.begin(), ciphertext.end());
 
-  OPENSSL_cleanse(plaintext.data(), plaintext.size());
   return result;
 }
 
 std::vector<VaultEntry> DecryptVault(
     const std::vector<uint8_t>& key,
     const std::vector<uint8_t>& blob) {
+  return DecryptVault(key, blob, {});
+}
+
+std::vector<VaultEntry> DecryptVault(
+    const std::vector<uint8_t>& key,
+    const std::vector<uint8_t>& blob,
+    const std::vector<uint8_t>& aad) {
   if (key.size() != 32)
     throw std::runtime_error("Vault decryption key must be 32 bytes");
 
@@ -113,6 +172,10 @@ std::vector<VaultEntry> DecryptVault(
   const uint8_t* tag = blob.data() + internal::kAesGcmIvBytes;
   const uint8_t* ciphertext = blob.data() + kVaultOverhead;
   size_t ciphertext_len = blob.size() - kVaultOverhead;
+  if (ciphertext_len > static_cast<size_t>(std::numeric_limits<int>::max()))
+    throw std::runtime_error("Vault ciphertext is too large");
+  const std::vector<uint8_t> authenticated_data =
+      aadWithNonce(aad, iv, internal::kAesGcmIvBytes);
 
   internal::EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new());
   if (!ctx) throw std::runtime_error("EVP_CIPHER_CTX_new failed");
@@ -124,7 +187,16 @@ std::vector<VaultEntry> DecryptVault(
     throw std::runtime_error("EVP_DecryptInit_ex failed");
   }
 
-  std::vector<uint8_t> plaintext(ciphertext_len);
+  int aad_len = 0;
+  if (!authenticated_data.empty() &&
+      EVP_DecryptUpdate(ctx.get(), nullptr, &aad_len,
+                        authenticated_data.data(),
+                        static_cast<int>(authenticated_data.size())) != 1) {
+    throw std::runtime_error("EVP_DecryptUpdate authenticated data failed");
+  }
+
+  std::vector<uint8_t> plaintext(ciphertext_len + 16);
+  VectorWiper wipe_plaintext(plaintext);
   int out_len = 0;
   if (EVP_DecryptUpdate(ctx.get(), plaintext.data(), &out_len,
                         ciphertext,
@@ -140,7 +212,6 @@ std::vector<VaultEntry> DecryptVault(
 
   int final_len = 0;
   if (EVP_DecryptFinal_ex(ctx.get(), plaintext.data() + out_len, &final_len) != 1) {
-    OPENSSL_cleanse(plaintext.data(), plaintext.size());
     throw std::runtime_error("Vault decryption failed — wrong master password or tampered data");
   }
 

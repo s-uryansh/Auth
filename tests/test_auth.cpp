@@ -31,6 +31,7 @@
 
 #include "auth/Authentication.hpp"
 #include "auth/Registration.hpp"
+#include "auth/WebsiteCredentialAuth.hpp"
 #include "auth/vault.hpp"
 
 // Helpers
@@ -1270,6 +1271,52 @@ TEST(RegistrationInputTest, RejectsServerNoncesWithWrongLength) {
   }
 }
 
+TEST(RegistrationInputTest, ExplicitSaltIsPreservedAndAuthenticates) {
+  DB db;
+  const std::string username = "explicit_protocol_salt_user";
+  const std::vector<uint8_t> server_nonce(16, 0xA7);
+  const std::vector<uint8_t> protocol_salt(16, 0x3C);
+  auto registration_password = Pw("ExplicitSaltPass1!");
+  const auto payload = auth::RegisterUser(
+      username, registration_password, server_nonce, protocol_salt, db);
+
+  EXPECT_EQ(payload.server_nonce_r, server_nonce);
+  ASSERT_TRUE(db.count(username));
+  EXPECT_EQ(db.at(username), protocol_salt);
+  auto login_password = Pw("ExplicitSaltPass1!");
+  EXPECT_TRUE(auth::AuthenticateUser(username, login_password, protocol_salt,
+                                     payload));
+}
+
+TEST(RegistrationInputTest, GeneratedNonceUsesExplicitSalt) {
+  DB db;
+  const std::string username = "generated_nonce_explicit_salt_user";
+  const std::vector<uint8_t> protocol_salt(16, 0x5D);
+  auto registration_password = Pw("ExplicitSaltPass3!");
+  const auto payload = auth::RegisterUserWithSalt(
+      username, registration_password, protocol_salt, db);
+
+  EXPECT_EQ(payload.server_nonce_r.size(), 16u);
+  ASSERT_TRUE(db.count(username));
+  EXPECT_EQ(db.at(username), protocol_salt);
+  auto login_password = Pw("ExplicitSaltPass3!");
+  EXPECT_TRUE(auth::AuthenticateUser(username, login_password, protocol_salt,
+                                     payload));
+}
+
+TEST(RegistrationInputTest, RejectsInvalidExplicitSaltWithoutStoring) {
+  const std::vector<uint8_t> server_nonce(16, 0xA7);
+  for (const std::size_t salt_length : {0u, 1u, 15u, 17u, 32u}) {
+    DB db;
+    const std::vector<uint8_t> invalid_salt(salt_length, 0x3C);
+    auto password = Pw("ExplicitSaltPass2!");
+    EXPECT_THROW(auth::RegisterUser("invalid_explicit_salt", password,
+                                    server_nonce, invalid_salt, db),
+                 std::runtime_error);
+    EXPECT_TRUE(db.empty());
+  }
+}
+
 TEST(AuthenticationInputTest, WrongUsernameWipesClientHash) {
   DB db;
   auto registration_password = Pw("ServerRecordPass1!");
@@ -1306,6 +1353,130 @@ TEST(AuthenticationInputTest, RejectsTruncatedEncryptedRecord) {
                std::runtime_error);
   EXPECT_TRUE(std::all_of(login_password.begin(), login_password.end(),
                           [](uint8_t byte) { return byte == 0; }));
+}
+
+TEST(WebsiteCredentialAuthStoreTest, IdentityIsStableAndLengthPrefixed) {
+  const std::string expected("\0\0\0\1w\0\0\0\1u", 10);
+  EXPECT_EQ(auth::WebsiteCredentialAuthStore::identity("w", "u"), expected);
+  EXPECT_NE(auth::WebsiteCredentialAuthStore::identity("ab", "c"),
+            auth::WebsiteCredentialAuthStore::identity("a", "bc"));
+}
+
+TEST(WebsiteCredentialAuthStoreTest, SameUsernameAtDifferentSitesIsIsolated) {
+  auth::WebsiteCredentialAuthStore store;
+  const std::string username = "same-user";
+  const std::string password_text = "SitePassword1!";
+  auto password_a = Pw(password_text);
+  auto password_b = Pw(password_text);
+  const std::vector<uint8_t> salt_a(16, 0x11);
+  const std::vector<uint8_t> salt_b(16, 0x22);
+
+  auto record_a = store.prepareRegistration(
+      "https://alpha.example", username, password_a, salt_a);
+  auto record_b = store.prepareRegistration(
+      "https://beta.example", username, password_b, salt_b);
+  EXPECT_NE(record_a.username, record_b.username);
+  store.commitRegistrations({record_a, record_b});
+
+  auto login_a = Pw(password_text);
+  auto login_b = Pw(password_text);
+  EXPECT_TRUE(store.authenticate("https://alpha.example", username, login_a,
+                                 salt_a));
+  EXPECT_TRUE(store.authenticate("https://beta.example", username, login_b,
+                                 salt_b));
+}
+
+TEST(WebsiteCredentialAuthStoreTest, PrepareDoesNotCommitUntilCommitCalled) {
+  auth::WebsiteCredentialAuthStore store;
+  const std::vector<uint8_t> salt(16, 0x33);
+  auto registration_password = Pw("StoreLifecyclePass1!");
+  const auto record = store.prepareRegistration(
+      "https://example.test", "store-user", registration_password, salt);
+
+  auto before_commit = Pw("StoreLifecyclePass1!");
+  EXPECT_FALSE(store.authenticate("https://example.test", "store-user",
+                                 before_commit, salt));
+  store.commitRegistration(record);
+  auto after_commit = Pw("StoreLifecyclePass1!");
+  EXPECT_TRUE(store.authenticate("https://example.test", "store-user",
+                                after_commit, salt));
+  EXPECT_EQ(after_commit, Pw("StoreLifecyclePass1!"));
+  store.clear();
+  auto after_clear = Pw("StoreLifecyclePass1!");
+  EXPECT_FALSE(store.authenticate("https://example.test", "store-user",
+                                 after_clear, salt));
+}
+
+TEST(WebsiteCredentialAuthStoreTest, DuplicateCommitDoesNotReplaceRecord) {
+  auth::WebsiteCredentialAuthStore store;
+  const std::vector<uint8_t> salt(16, 0x44);
+  auto first_password = Pw("OriginalCredential1!");
+  const auto first_record = store.prepareRegistration(
+      "https://example.test", "duplicate-user", first_password, salt);
+  store.commitRegistration(first_record);
+
+  auto replacement_password = Pw("ReplacementCredential2!");
+  const auto replacement_record = store.prepareRegistration(
+      "https://example.test", "duplicate-user", replacement_password, salt);
+  EXPECT_THROW(store.commitRegistration(replacement_record), std::runtime_error);
+
+  auto original_login = Pw("OriginalCredential1!");
+  auto replacement_login = Pw("ReplacementCredential2!");
+  EXPECT_TRUE(store.authenticate("https://example.test", "duplicate-user",
+                                 original_login, salt));
+  EXPECT_FALSE(store.authenticate("https://example.test", "duplicate-user",
+                                  replacement_login, salt));
+}
+
+TEST(WebsiteCredentialAuthStoreTest, MissingRecordAndWrongPasswordFail) {
+  auth::WebsiteCredentialAuthStore store;
+  const std::vector<uint8_t> salt(16, 0x55);
+  auto missing_password = Pw("SomeCredential1!");
+  EXPECT_FALSE(store.authenticate("https://missing.example", "user",
+                                  missing_password, salt));
+
+  auto registration_password = Pw("CorrectCredential1!");
+  const auto record = store.prepareRegistration(
+      "https://example.test", "auth-user", registration_password, salt);
+  store.commitRegistration(record);
+  auto wrong_password = Pw("IncorrectCredential1!");
+  EXPECT_FALSE(store.authenticate("https://example.test", "auth-user",
+                                  wrong_password, salt));
+}
+
+TEST(WebsiteCredentialAuthStoreTest, RecordForDifferentIdentityDoesNotAuthenticate) {
+  auth::WebsiteCredentialAuthStore store;
+  const std::vector<uint8_t> salt(16, 0x66);
+  auto registration_password = Pw("IdentityCredential1!");
+  auto mismatched_record = store.prepareRegistration(
+      "https://example.test", "expected-user", registration_password, salt);
+  mismatched_record.username = "different-record-identity";
+  store.commitRegistration(mismatched_record);
+
+  auto login_password = Pw("IdentityCredential1!");
+  EXPECT_FALSE(store.authenticate("https://example.test", "expected-user",
+                                  login_password, salt));
+}
+
+TEST(WebsiteCredentialAuthStoreTest, BatchCommitRejectsDuplicatesAtomically) {
+  auth::WebsiteCredentialAuthStore store;
+  const std::vector<uint8_t> salt(16, 0x77);
+  auto first_password = Pw("BatchCredential1!");
+  const auto first_record = store.prepareRegistration(
+      "https://one.example", "user", first_password, salt);
+  auto second_password = Pw("BatchCredential2!");
+  const auto second_record = store.prepareRegistration(
+      "https://two.example", "user", second_password, salt);
+
+  EXPECT_THROW(store.commitRegistrations(
+                   {first_record, second_record, first_record}),
+               std::runtime_error);
+  auto login_one = Pw("BatchCredential1!");
+  auto login_two = Pw("BatchCredential2!");
+  EXPECT_FALSE(store.authenticate("https://one.example", "user", login_one,
+                                  salt));
+  EXPECT_FALSE(store.authenticate("https://two.example", "user", login_two,
+                                  salt));
 }
 
 // ---

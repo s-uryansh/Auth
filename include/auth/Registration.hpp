@@ -52,6 +52,17 @@ auto RegisterUser(
     std::unordered_map<std::string, std::vector<uint8_t>>& local_db)
     -> RegistrationPayload;
 
+// RegisterUser — Registration with caller-supplied protocol salt S and
+// server nonce R. Both values must be exactly 16 bytes. This overload is for
+// callers that persist S locally alongside an encrypted credential.
+auto RegisterUser(
+    const std::string& username,
+    std::vector<uint8_t>& password,
+    const std::vector<uint8_t>& server_r,
+    const std::vector<uint8_t>& salt_s,
+    std::unordered_map<std::string, std::vector<uint8_t>>& local_db)
+    -> RegistrationPayload;
+
 // RegisterUser — Registration with internally-generated R.
 // Generates R via CSPRNG and delegates to the explicit-nonce overload.
 // Use in tests and single-process simulations.
@@ -63,6 +74,17 @@ auto RegisterUser(
 auto RegisterUser(
     const std::string& username,
     std::vector<uint8_t>& password,
+    std::unordered_map<std::string, std::vector<uint8_t>>& local_db)
+    -> RegistrationPayload;
+
+// RegisterUserWithSalt — Registration with caller-supplied protocol salt S
+// and an internally-generated server nonce R. S must be exactly 16 bytes.
+// A distinct name avoids a signature collision with the existing overload
+// that accepts an explicit server nonce.
+auto RegisterUserWithSalt(
+    const std::string& username,
+    std::vector<uint8_t>& password,
+    const std::vector<uint8_t>& salt_s,
     std::unordered_map<std::string, std::vector<uint8_t>>& local_db)
     -> RegistrationPayload;
 
