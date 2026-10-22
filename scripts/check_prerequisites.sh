@@ -109,8 +109,10 @@ check_android() {
     check_file 'Qt Android deployment tool' "$QT_HOST_PREFIX/bin/androiddeployqt" QT_HOST_PREFIX executable
     if [[ -n "${JAVA_HOME:-}" ]]; then
         check_file Java "$JAVA_HOME/bin/java" JAVA_HOME executable
+        check_file 'Java compiler' "$JAVA_HOME/bin/javac" JAVA_HOME executable
     else
         check_tool Java java PATH
+        check_tool 'Java compiler' javac PATH
     fi
     check_file 'Android NDK' "$ANDROID_NDK" 'ANDROID_NDK, ANDROID_NDK_HOME, or ANDROID_NDK_ROOT' directory
     check_file 'Android NDK CMake toolchain' "$ANDROID_NDK/build/cmake/android.toolchain.cmake" ANDROID_NDK

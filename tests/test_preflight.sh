@@ -57,6 +57,7 @@ CMAKE_STUB
     printf '#!/bin/sh\nprintf "stub compiler\\n"\n' > "$base/bin/c++"
     printf '#!/bin/sh\nprintf "git version 2.40.0\\n"\n' > "$base/bin/git"
     printf '#!/bin/sh\nprintf "openjdk version 17\\n"\n' > "$base/bin/java"
+    printf '#!/bin/sh\nprintf "javac 17\\n"\n' > "$base/bin/javac"
     printf '#!/bin/sh\nprintf "ctest version 3.24.0\\n"\n' > "$base/bin/ctest"
     chmod +x "$base/bin/"*
     touch "$base/vcpkg root/vcpkg" "$base/vcpkg root/scripts/buildsystems/vcpkg.cmake"

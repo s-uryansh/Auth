@@ -8,6 +8,20 @@ Auth is a C++17 Qt application containing an in-memory registration/login demo a
 
 After a successful login, the app shows Password Manager and QR Sync. Auth accounts last only for the current run. The vault is stored separately on the device and is not tied to an Auth username.
 
+## Getting started
+
+```bash
+git clone --branch AuthV3 --single-branch https://github.com/s-uryansh/Auth.git
+cd Auth
+make setup
+```
+
+`make setup` installs Ubuntu/Debian command-line build packages and OpenJDK 17, bootstraps vcpkg, and installs the desktop manifest dependencies. If Android command-line tools are already installed, it can also install Android SDK platform/build tools and the NDK, and then build the Android vcpkg dependencies. It asks `sdkmanager` to show the Android license prompts; review and accept them yourself.
+
+Qt 6 requires a manual account/download step. At the end of setup, follow the printed instructions to sign in or create a Qt account, download the Qt Online Installer, and install the Qt 6.12.0 Linux desktop GCC 64-bit and Android arm64-v8a kits. Include Core, Gui, Widgets, Qt Svg, and the Android deployment tools. The default kit locations are `$HOME/Qt/6.12.0/gcc_64` and `$HOME/Qt/6.12.0/android_arm64_v8a`; override `QT_HOST_PREFIX` or `QT_ANDROID_PREFIX` if you choose different paths. If `sdkmanager` was not found, install Google's Android command-line tools and follow the SDK/NDK commands printed by `make setup`.
+
+After installing Qt and any remaining Android tools, check readiness with `make preflight-desktop` and `make preflight-android`.
+
 ## Make targets
 
 Run these from the project root:
@@ -22,6 +36,7 @@ Run these from the project root:
 | `make clean` | Remove the desktop build directory |
 | `make android` | Configure and package the arm64-v8a debug APK |
 | `make android-clean` | Remove the Android build directory |
+| `make setup` | Install command-line prerequisites and vcpkg dependencies; print remaining manual setup steps |
 | `make preflight-desktop` | Check desktop build prerequisites without building |
 | `make preflight-android` | Check Android packaging prerequisites without building |
 | `make preflight-test` | Check the CTest runner |
@@ -138,7 +153,9 @@ flowchart TD
 
 ## Build requirements
 
-Desktop builds require CMake 3.20 or newer, a C++17 compiler, Git, vcpkg and the manifest dependencies, Qt 6 Core/Gui/Widgets and its Qt Svg CMake dependency, and the host GTest package. Android packaging also needs a Qt Android arm64 kit with those Qt modules, the Qt host deployment tool, Java, an Android NDK, and an SDK with API 30 or newer plus Android build-tools. The Qt kit provides the Gradle wrapper; its user cache must be writable. System-wide Gradle and `adb` are not used by these targets.
+Desktop builds require CMake 3.20 or newer, a C++17 compiler, Git, vcpkg and the manifest dependencies, Qt 6 Core/Gui/Widgets and its Qt Svg CMake dependency, and the host GTest package. Android packaging also needs a Qt Android arm64 kit with those Qt modules, the Qt host deployment tool, a JDK with both `java` and `javac`, an Android NDK, and an SDK with API 30 or newer plus Android build-tools. The Qt kit provides the Gradle wrapper; its user cache must be writable. System-wide Gradle and `adb` are not used by these targets.
+
+`make setup` currently supports Ubuntu and Debian through `apt-get`. It does not install Qt because Qt requires the account-based installer and kit selection described above. Android SDK command-line tools are also a separate Google download; once installed, setup uses `sdkmanager` to install API 35, build-tools 35.0.0, and NDK 27.2.12479018. Android SDK licenses are shown interactively for you to review and accept.
 
 The preflight checks installed paths locally and reports all missing requirements for the selected target with `✗` diagnostics. Install or configure the missing item before retrying. It does not check network availability; vcpkg may need network access when dependencies are first installed.
 

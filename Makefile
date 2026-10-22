@@ -1,6 +1,6 @@
 # User-facing targets:
 #   make all (desktop + Android), build, test, ui, demo, clean,
-#   android, android-clean, help
+#   android, android-clean, setup, help
 
 .DEFAULT_GOAL := all
 
@@ -25,7 +25,7 @@ QT_HOST_PREFIX ?= /home/s-uryansh/Qt/6.12.0/gcc_64
 # Keep all prerequisites for the combined target ahead of its sequential builds,
 # including when the caller requests parallel Make execution.
 .NOTPARALLEL: all test
-.PHONY: all build desktop-build test ui demo clean android android-package android-clean help
+.PHONY: all build desktop-build test ui demo clean android android-package android-clean setup help
 .PHONY: preflight-desktop preflight-android preflight-test
 
 all: preflight-desktop preflight-android desktop-build android-package
@@ -113,6 +113,12 @@ android-package: preflight-android
 android-clean:
 	@rm -rf "$(ANDROID_BUILD_DIR)"
 
+setup:
+	@PROJECT_ROOT="$(CURDIR)" VCPKG_ROOT="$(VCPKG_ROOT)" \
+	 ANDROID_SDK_ROOT="$(ANDROID_SDK_ROOT)" ANDROID_NDK="$(ANDROID_NDK)" \
+	 QT_HOST_PREFIX="$(QT_HOST_PREFIX)" QT_ANDROID_PREFIX="$(QT_ANDROID_PREFIX)" \
+	 ./scripts/setup_dependencies.sh
+
 help:
 	@echo "Usage: make [target]"
 	@echo ""
@@ -125,6 +131,7 @@ help:
 	@echo "  clean         Remove desktop build directory"
 	@echo "  android       Configure and package the arm64-v8a Android APK"
 	@echo "  android-clean Remove Android build directory"
+	@echo "  setup         Install command-line dependencies and prepare vcpkg"
 	@echo "  preflight-desktop Check desktop build prerequisites only"
 	@echo "  preflight-android Check Android packaging prerequisites only"
 	@echo "  preflight-test Check the CTest runner only"
