@@ -6,6 +6,7 @@
     "openssl",
     "liboqs",
     "argon2",
+    "nu-book-zxing-cpp",
     {
       "name": "gtest",
       "host": true

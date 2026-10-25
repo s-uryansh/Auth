@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -199,6 +200,35 @@ TEST(PasswordVaultWorkflowTest, UnlockMigratesV1AndAddsMissingProtocolSalt) {
     ASSERT_EQ(persisted.size(), 1u);
     EXPECT_EQ(persisted[0].salt, unlocked[0].salt);
     EXPECT_TRUE(workflow.authenticate(unlocked[0]));
+}
+
+TEST(PasswordVaultWorkflowTest, ImportedVaultEntriesMergeAndPersistLatestCredential) {
+    const std::vector<uint8_t> key(32, 0x5A);
+    MemoryVaultStorage storage;
+    const auto earlier = std::chrono::system_clock::time_point(std::chrono::seconds(10));
+    const auto later = std::chrono::system_clock::time_point(std::chrono::seconds(20));
+    storage.file = makeVault(storage, key, 2,
+        {{"https://same.example", "alice", bytes("LocalPassword1!"),
+          std::vector<uint8_t>(16, 0x21), earlier}});
+    auth::WebsiteCredentialAuthStore protocol_store;
+    PasswordVaultWorkflow workflow(storage, protocol_store);
+    const std::vector<auth::VaultEntry> imported = {
+        {"https://same.example", "alice", bytes("RemotePassword2!"),
+         std::vector<uint8_t>(16, 0x22), later},
+        {"https://new.example", "bob", bytes("NewCredential3!"),
+         std::vector<uint8_t>(16, 0x23), later}};
+
+    const auto merged = workflow.mergeImportedEntries(key, imported);
+
+    ASSERT_EQ(merged.size(), 2u);
+    const auto persisted = auth::DecryptVault(
+        key, storage.file.ciphertext, storage.authenticatedData(storage.file));
+    ASSERT_EQ(persisted.size(), 2u);
+    EXPECT_EQ(persisted[0].password, bytes("RemotePassword2!"));
+    EXPECT_TRUE(storage.file.websites.contains(QStringLiteral("https://new.example")));
+    auto remote_password = bytes("RemotePassword2!");
+    EXPECT_TRUE(protocol_store.authenticate("https://same.example", "alice",
+                                             remote_password, persisted[0].salt));
 }
 
 TEST(PasswordVaultWorkflowTest, WrongKeyLeavesLegacyFileUnchanged) {

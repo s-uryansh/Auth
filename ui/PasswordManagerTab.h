@@ -27,11 +27,17 @@ public:
     explicit PasswordManagerTab(QWidget *parent = nullptr);
     ~PasswordManagerTab() override;
 
+    bool exportVaultEntriesForSync(std::vector<auth::VaultEntry> &entries,
+                                   QString &error);
+    bool importVaultEntriesFromSync(std::vector<auth::VaultEntry> entries,
+                                    QString &error);
+
 private slots:
     void onSetupClicked();
     void onAddClicked();
     void onShowBrowseClicked();
     void onShowAddClicked();
+    void onDeleteVaultClicked();
     void onWebsiteClicked(QListWidgetItem *item);
     void checkRevealSession();
 
@@ -43,6 +49,7 @@ private:
     void filterWebsiteList(const QString &query);
     void revealWebsiteCredentials(const QString &website);
     bool unlockForViewing();
+    bool createVaultForSync(QString &error);
 
     QStackedWidget *pages_;
     QWidget *setup_page_;
@@ -57,6 +64,7 @@ private:
     QPushButton *add_btn_;
     QPushButton *show_browse_btn_;
     QPushButton *show_add_btn_;
+    QPushButton *delete_vault_btn_;
     QLineEdit *search_input_;
     QListWidget *website_list_;
     QWidget *credential_cards_widget_;

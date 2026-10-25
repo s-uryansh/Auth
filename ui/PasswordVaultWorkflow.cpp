@@ -3,6 +3,7 @@
 #include "SensitiveData.h"
 
 #include <stdexcept>
+#include <algorithm>
 #include <unordered_set>
 #include <utility>
 
@@ -105,6 +106,48 @@ std::vector<auth::VaultEntry> PasswordVaultWorkflow::unlockAndMigrate(
     protocol_store_ = std::move(staged_protocol_store);
     wipe_entries.release();
     return entries;
+}
+
+std::vector<auth::VaultEntry> PasswordVaultWorkflow::mergeImportedEntries(
+    const std::vector<uint8_t> &key,
+    const std::vector<auth::VaultEntry> &imported) {
+    const PasswordVaultFile original = storage_.load();
+    std::vector<auth::VaultEntry> merged = auth::DecryptVault(
+        key, original.ciphertext, storage_.authenticatedData(original));
+    VaultEntriesWiper wipe_entries(merged);
+
+    for (const auth::VaultEntry &remote : imported) {
+        const std::string identity = auth::WebsiteCredentialAuthStore::identity(
+            remote.website, remote.username);
+        auto existing = std::find_if(merged.begin(), merged.end(),
+            [&identity](const auth::VaultEntry &entry) {
+                return auth::WebsiteCredentialAuthStore::identity(
+                    entry.website, entry.username) == identity;
+            });
+        if (existing == merged.end()) {
+            merged.push_back(remote);
+        } else if (remote.lastModified > existing->lastModified) {
+            ui::wipeVaultEntry(*existing);
+            *existing = remote;
+        }
+    }
+
+    std::vector<auth::RegistrationPayload> records =
+        prepareRecords(merged, original.format_version == 1);
+    auth::WebsiteCredentialAuthStore staged_protocol_store;
+    staged_protocol_store.commitRegistrations(records);
+
+    PasswordVaultFile updated = original;
+    updated.format_version = 2;
+    for (const auth::VaultEntry &entry : merged)
+        appendWebsiteIfMissing(updated, entry.website);
+    updated.ciphertext = auth::EncryptVault(
+        key, merged, storage_.authenticatedData(updated));
+    storage_.save(updated);
+
+    protocol_store_ = std::move(staged_protocol_store);
+    wipe_entries.release();
+    return merged;
 }
 
 void PasswordVaultWorkflow::saveNewCredential(

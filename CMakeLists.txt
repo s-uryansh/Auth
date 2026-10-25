@@ -11,6 +11,7 @@ set(STRICT_CXX_FLAGS -Wall -Wextra -Werror -pedantic -Wshadow -Wnon-virtual-dtor
 find_package(OpenSSL REQUIRED)
 find_package(liboqs CONFIG REQUIRED)
 find_package(unofficial-argon2 CONFIG REQUIRED)
+find_package(ZXing CONFIG REQUIRED)
 
 add_library(AuthLib src/Registration.cpp src/Authentication.cpp src/vault.cpp
   src/WebsiteCredentialAuth.cpp)
@@ -21,21 +22,26 @@ target_compile_options(AuthLib PRIVATE ${STRICT_CXX_FLAGS})
 set(AUTH_QT_SOURCES
   ui/main.cpp ui/AuthTab.cpp ui/AuthTab.h ui/MainWindow.cpp ui/MainWindow.h
   ui/PasswordManagerTab.cpp ui/PasswordManagerTab.h
+  ui/QRSyncTab.cpp ui/QRSyncTab.h
   ui/PasswordVaultWorkflow.cpp ui/PasswordVaultWorkflow.h
   ui/SensitiveData.cpp ui/SensitiveData.h
-  ui/PasswordVaultFileStore.cpp ui/PasswordVaultFileStore.h
-  ui/QRSyncTab.cpp ui/QRSyncTab.h)
+  ui/PasswordVaultFileStore.cpp ui/PasswordVaultFileStore.h)
 
 if(ANDROID)
-  find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui)
+  find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Multimedia Concurrent Network)
   # This app stores data in its private app directory and opens URLs with an
   # external handler, so Qt Core's broad network/public-storage permissions
   # are not needed in the APK.
   set_property(TARGET Qt6::Core PROPERTY QT_ANDROID_PERMISSIONS "")
   set_property(TARGET Qt6::Core PROPERTY INTERFACE_QT_ANDROID_PERMISSIONS "")
+  # The scanner only needs CAMERA. Qt Multimedia's recording features would
+  # otherwise add microphone, Bluetooth, and audio settings permissions.
+  set_property(TARGET Qt6::Multimedia PROPERTY QT_ANDROID_PERMISSIONS "")
+  set_property(TARGET Qt6::Multimedia PROPERTY INTERFACE_QT_ANDROID_PERMISSIONS "")
   qt_policy(SET QTP0002 NEW)
   qt_add_executable(AuthQt MANUAL_FINALIZATION ${AUTH_QT_SOURCES})
-  target_link_libraries(AuthQt PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui AuthLib OQS::oqs)
+  target_link_libraries(AuthQt PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Concurrent Qt6::Network
+    AuthLib OQS::oqs ZXing::ZXing)
   target_compile_options(AuthQt PRIVATE ${STRICT_CXX_FLAGS})
   set_target_properties(AuthQt PROPERTIES
     QT_ANDROID_PACKAGE_NAME "org.tmps.auth"
@@ -46,7 +52,7 @@ if(ANDROID)
 else()
   list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed/x64-linux")
   find_package(GTest CONFIG REQUIRED)
-  find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui)
+  find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Multimedia Concurrent Network)
 
   set(SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer)
   add_executable(AuthUI src/main.cpp)
@@ -92,6 +98,20 @@ else()
   target_compile_options(PasswordManagerWorkflowTests PRIVATE ${STRICT_CXX_FLAGS})
   add_test(NAME PasswordManagerWorkflowTests COMMAND PasswordManagerWorkflowTests)
 
+  add_executable(QRSyncTests
+    tests/test_qrsync.cpp
+    ui/PasswordVaultFileStore.cpp
+    ui/PasswordVaultWorkflow.cpp
+    ui/SensitiveData.cpp)
+  target_include_directories(QRSyncTests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui)
+  target_link_libraries(QRSyncTests PRIVATE
+    AuthLib Qt6::Core GTest::gtest_main ZXing::Core)
+  target_compile_options(QRSyncTests PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
+  target_link_options(QRSyncTests PRIVATE ${SANITIZER_FLAGS})
+  add_test(NAME QRSyncTests COMMAND QRSyncTests)
+
   add_custom_target(LSanCheck
     COMMAND ${CMAKE_COMMAND} -E env "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp" ${CMAKE_BINARY_DIR}/AuthUI
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -99,7 +119,8 @@ else()
     VERBATIM)
 
   add_executable(AuthQt ${AUTH_QT_SOURCES})
-  target_link_libraries(AuthQt PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui AuthLib OQS::oqs)
+  target_link_libraries(AuthQt PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Concurrent
+    AuthLib OQS::oqs ZXing::ZXing)
   target_compile_options(AuthQt PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
   target_link_options(AuthQt PRIVATE ${SANITIZER_FLAGS})
 endif()

@@ -20,5 +20,10 @@ lib/
 Thumbs.db
 
 TMPS_Auth.pdf
-task.md
-Agents.md
+AGENTS.md
+.claude/
+DECISIONS.md
+PLAN.md
+SPEC.md
+SYNC_REPORT.md
+.superpowers/

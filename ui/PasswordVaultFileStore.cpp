@@ -64,8 +64,10 @@ void appendLengthPrefixed(std::vector<uint8_t> &bytes,
 
 bool readLength(const QByteArray &bytes, qsizetype &offset, quint32 &length) {
     if (offset < 0 || bytes.size() - offset < 4) return false;
-    length = qFromBigEndian<quint32>(
-        reinterpret_cast<const uchar *>(bytes.constData() + offset));
+    length = (static_cast<quint32>(static_cast<uchar>(bytes[offset])) << 24) |
+             (static_cast<quint32>(static_cast<uchar>(bytes[offset+1])) << 16) |
+             (static_cast<quint32>(static_cast<uchar>(bytes[offset+2])) << 8) |
+             static_cast<quint32>(static_cast<uchar>(bytes[offset+3]));
     offset += 4;
     return true;
 }
@@ -74,8 +76,8 @@ void validateEncodedLengths(const QByteArray &bytes) {
     if (bytes.size() < 6) {
         throw std::runtime_error("Password vault file header is truncated");
     }
-    const quint16 version = qFromBigEndian<quint16>(
-        reinterpret_cast<const uchar *>(bytes.constData() + 4));
+    const quint16 version = (static_cast<quint16>(static_cast<uchar>(bytes[4])) << 8) |
+                            static_cast<quint16>(static_cast<uchar>(bytes[5]));
     if (version != kLegacyVaultFileVersion && version != kVaultFileVersion) {
         throw std::runtime_error("Password vault file version is unsupported");
     }
@@ -92,8 +94,10 @@ void validateEncodedLengths(const QByteArray &bytes) {
     if (bytes.size() - offset < 4) {
         throw std::runtime_error("Password vault website index is truncated");
     }
-    website_count = qFromBigEndian<quint32>(
-        reinterpret_cast<const uchar *>(bytes.constData() + offset));
+    website_count = (static_cast<quint32>(static_cast<uchar>(bytes[offset])) << 24) |
+                    (static_cast<quint32>(static_cast<uchar>(bytes[offset+1])) << 16) |
+                    (static_cast<quint32>(static_cast<uchar>(bytes[offset+2])) << 8) |
+                    static_cast<quint32>(static_cast<uchar>(bytes[offset+3]));
     offset += 4;
     if (website_count > kMaximumWebsiteCount) {
         throw std::runtime_error("Password vault website index is too large");
@@ -147,6 +151,11 @@ PasswordVaultFileStore::PasswordVaultFileStore(QString filePath)
 
 bool PasswordVaultFileStore::exists() const {
     return QFileInfo::exists(file_path_);
+}
+
+bool PasswordVaultFileStore::remove() {
+    QFile file(file_path_);
+    return !file.exists() || file.remove();
 }
 
 PasswordVaultFile PasswordVaultFileStore::load() const {
@@ -264,4 +273,4 @@ std::vector<uint8_t> PasswordVaultFileStore::authenticatedData(
             static_cast<size_t>(utf8.size()));
     }
     return aad;
-}
+} // namespace

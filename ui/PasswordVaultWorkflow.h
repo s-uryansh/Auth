@@ -16,6 +16,9 @@ public:
 
     std::vector<auth::VaultEntry> unlockAndMigrate(
         const std::vector<uint8_t> &key);
+    std::vector<auth::VaultEntry> mergeImportedEntries(
+        const std::vector<uint8_t> &key,
+        const std::vector<auth::VaultEntry> &imported);
     void saveNewCredential(const std::vector<uint8_t> &key,
                            const QString &website,
                            const std::string &username,

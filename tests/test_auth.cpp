@@ -1219,8 +1219,10 @@ TEST(VaultCompatibilityTest, PreservesSerializedBytesAndEncryptedLayout) {
   entry.username = "testuser";
   entry.password = {0x01, 0x02, 0x03, 0x04};
   entry.salt = {0xAA, 0xBB, 0xCC, 0xDD};
+  entry.lastModified = std::chrono::system_clock::from_time_t(1700000000);
   const std::vector<auth::VaultEntry> entries = {entry};
 
+  // 1700000000 in hex is 0x6553F100, as big-endian uint64_t: 00 00 00 00 65 53 F1 00
   const std::vector<std::uint8_t> expected_serialized = {
       0x00, 0x00, 0x00, 0x01,  // entry count
       0x00, 0x00, 0x00, 0x0B,  // website length
@@ -1228,7 +1230,8 @@ TEST(VaultCompatibilityTest, PreservesSerializedBytesAndEncryptedLayout) {
       0x00, 0x00, 0x00, 0x08,  // username length
       't', 'e', 's', 't', 'u', 's', 'e', 'r',
       0x00, 0x00, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04,
-      0x00, 0x00, 0x00, 0x04, 0xAA, 0xBB, 0xCC, 0xDD};
+      0x00, 0x00, 0x00, 0x04, 0xAA, 0xBB, 0xCC, 0xDD,
+      0x00, 0x00, 0x00, 0x00, 0x65, 0x53, 0xF1, 0x00};  // lastModified as uint64_t big-endian
   const std::vector<std::uint8_t> serialized = auth::SerializeVault(entries);
   EXPECT_EQ(serialized, expected_serialized);
   EXPECT_EQ(auth::SerializeVault(auth::DeserializeVault(serialized)), serialized);

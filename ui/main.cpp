@@ -7,6 +7,10 @@ int main(int argc, char *argv[]) {
     app.setOrganizationName("TMPS");
 
     MainWindow w;
+#ifdef Q_OS_ANDROID
+    w.showMaximized();
+#else
     w.show();
+#endif
     return app.exec();
 }

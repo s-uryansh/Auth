@@ -6,7 +6,7 @@
 
 Auth is a C++17 Qt application containing an in-memory registration/login demo and a device-local encrypted password vault. Its protocol library uses ML-KEM-768, AES-256-GCM, SHA-256, HMAC, and Argon2id.
 
-After a successful login, the app shows Password Manager and QR Sync. Auth accounts last only for the current run. The vault is stored separately on the device and is not tied to an Auth username.
+After a successful login, the app shows Password Manager. Auth accounts last only for the current run. The vault is stored separately on the device and is not tied to an Auth username.
 
 ## Getting started
 
@@ -112,6 +112,12 @@ flowchart TD
     V --> H
 ```
 
+### QR Sync status
+
+QR Sync asks which device is being used. The current requested UI opens a camera scanner on **New Device** and shows a pairing QR on **Old Device**. This reverses Protocol 4's QR direction in `TMPS_Auth.pdf`, where the new device displays a QR and the old device scans it. The mismatch is recorded in `DECISIONS.md`.
+
+Pairing codes expire after five minutes. The Qt application uses Qt Multimedia for camera frames and ZXing-C++ to decode QR codes. Secure peer transport, mutual approval, and vault import are not yet integrated; the UI must not report a successful sync until those Protocol 4 phases are implemented.
+
 ### Android APK build
 
 `make android` checks Android packaging prerequisites, configures the arm64-v8a build, and asks Qt and Gradle to produce the debug APK. The default `make` target checks both desktop and Android requirements, then builds desktop followed by Android.
@@ -153,7 +159,7 @@ flowchart TD
 
 ## Build requirements
 
-Desktop builds require CMake 3.20 or newer, a C++17 compiler, Git, vcpkg and the manifest dependencies, Qt 6 Core/Gui/Widgets and its Qt Svg CMake dependency, and the host GTest package. Android packaging also needs a Qt Android arm64 kit with those Qt modules, the Qt host deployment tool, a JDK with both `java` and `javac`, an Android NDK, and an SDK with API 30 or newer plus Android build-tools. The Qt kit provides the Gradle wrapper; its user cache must be writable. System-wide Gradle and `adb` are not used by these targets.
+Desktop builds require CMake 3.20 or newer, a C++17 compiler, Git, vcpkg and the manifest dependencies (including ZXing-C++), Qt 6 Core/Gui/Widgets/Multimedia and its Qt Svg CMake dependency, and the host GTest package. Android packaging also needs a Qt Android arm64 kit with those Qt modules, the Qt host deployment tool, a JDK with both `java` and `javac`, an Android NDK, and an SDK with API 30 or newer plus Android build-tools. The Qt kit provides the Gradle wrapper; its user cache must be writable. System-wide Gradle and `adb` are not used by these targets.
 
 `make setup` currently supports Ubuntu and Debian through `apt-get`. It does not install Qt because Qt requires the account-based installer and kit selection described above. Android SDK command-line tools are also a separate Google download; once installed, setup uses `sdkmanager` to install API 35, build-tools 35.0.0, and NDK 27.2.12479018. Android SDK licenses are shown interactively for you to review and accept.
 

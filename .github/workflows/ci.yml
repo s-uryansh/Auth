@@ -1,19 +1,54 @@
 name: Auth CI
-on: [push, pull_request]
+
+on:
+  push:
+    branches: [main, AuthV3]
+  pull_request:
+    branches: [main, AuthV3]
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
 
-      - name: Install Qt
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config libargp-dev g++ cmake make
+
+      - name: Setup Qt 6
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.3'
           target: desktop
+          modules: 'qt5compat'
 
-      - name: Setup vcpkg
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_ROOT }}
+          key: vcpkg-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-
+
+      - name: Setup vcpkg and install dependencies
         uses: lukka/run-vcpkg@v11
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/build
+          key: cmake-build-${{ github.ref }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json', 'tests/test_qrsync.cpp', 'include/auth/sync_protocol.hpp') }}
+          restore-keys: |
+            cmake-build-${{ github.ref }}-
+            cmake-build-
 
       - name: Configure CMake
         run: >-
@@ -21,11 +56,30 @@ jobs:
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=x64-linux
           -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+          -DCMAKE_INSTALL_PREFIX=$PWD/install
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --parallel
 
-      - name: Run Tests
-        run: ctest --test-dir build --output-on-failure
-        env:
-          QT_QPA_PLATFORM: offscreen
+      - name: Run tests with output-on-failure
+        run: ctest --test-dir build --output-on-failure --parallel --test-regex "Auth|QRSync|Vault"
+
+      - name: List test targets for verification
+        run: ctest --test-dir build --print-labels --test-regex "Auth|QRSync|Vault" || true
+        continue-on-error: true
+
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/Testing/*/Test.xml
+          retention-days: 7
+
+      - name: Upload QR Sync test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qrsync-test-results
+          path: build/Testing/*/QRSync*Test.xml
+          retention-days: 7

@@ -1,6 +1,7 @@
 #include "auth/vault.hpp"
 #include "auth/crypto_utils.hpp"
 
+#include <chrono>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -12,14 +13,23 @@
 
 namespace auth {
 
+// Append uint64_t in big-endian format (used for vault lastModified serialization)
+void appendU64(std::vector<uint8_t>& bytes, uint64_t value) {
+  bytes.push_back(static_cast<uint8_t>(value >> 56));
+  bytes.push_back(static_cast<uint8_t>(value >> 48));
+  bytes.push_back(static_cast<uint8_t>(value >> 40));
+  bytes.push_back(static_cast<uint8_t>(value >> 32));
+  bytes.push_back(static_cast<uint8_t>(value >> 24));
+  bytes.push_back(static_cast<uint8_t>(value >> 16));
+  bytes.push_back(static_cast<uint8_t>(value >> 8));
+  bytes.push_back(static_cast<uint8_t>(value));
+}
+
 namespace {
 
 std::vector<uint8_t> aadWithNonce(const std::vector<uint8_t>& aad,
                                   const uint8_t* nonce,
                                   size_t nonce_size) {
-  // Version 1 vaults were encrypted without any AAD. Keep that wire behavior
-  // when callers provide empty metadata; version 2 metadata is always nonempty
-  // and binds both the header and nonce.
   if (aad.empty()) return {};
   if (aad.size() > static_cast<size_t>(std::numeric_limits<int>::max()) -
                        nonce_size) {
@@ -45,6 +55,7 @@ private:
 };
 
 }  // namespace
+
 
 std::vector<uint8_t> GenerateSalt() {
   std::vector<uint8_t> salt(kSaltSize);
@@ -240,6 +251,9 @@ std::vector<uint8_t> SerializeVault(const std::vector<VaultEntry>& entries) {
     append_bytes({e.username.begin(), e.username.end()});
     append_bytes(e.password);
     append_bytes(e.salt);
+    auto epoch = std::chrono::duration_cast<std::chrono::seconds>(
+        e.lastModified.time_since_epoch()).count();
+    appendU64(result, static_cast<uint64_t>(epoch));
   }
 
   return result;
@@ -268,7 +282,7 @@ std::vector<VaultEntry> DeserializeVault(const std::vector<uint8_t>& data) {
   };
 
   uint32_t count = read_u32();
-  constexpr size_t kMinimumEntryBytes = 4 * sizeof(uint32_t);
+  constexpr size_t kMinimumEntryBytes = 5 * sizeof(uint32_t);
   if (count > (data.size() - pos) / kMinimumEntryBytes)
     throw std::runtime_error("Vault data corrupted");
 
@@ -281,6 +295,21 @@ std::vector<VaultEntry> DeserializeVault(const std::vector<uint8_t>& data) {
     e.username = std::string(username_bytes.begin(), username_bytes.end());
     e.password = read_bytes();
     e.salt = read_bytes();
+    auto read_u64 = [&data, &pos]() -> uint64_t {
+      if (pos + 8 > data.size()) throw std::runtime_error("Vault data corrupted");
+      uint64_t val = (static_cast<uint64_t>(data[pos]) << 56) |
+                     (static_cast<uint64_t>(data[pos + 1]) << 48) |
+                     (static_cast<uint64_t>(data[pos + 2]) << 40) |
+                     (static_cast<uint64_t>(data[pos + 3]) << 32) |
+                     (static_cast<uint64_t>(data[pos + 4]) << 24) |
+                     (static_cast<uint64_t>(data[pos + 5]) << 16) |
+                     (static_cast<uint64_t>(data[pos + 6]) << 8) |
+                     static_cast<uint64_t>(data[pos + 7]);
+      pos += 8;
+      return val;
+    };
+    uint64_t epoch = read_u64();
+    e.lastModified = std::chrono::system_clock::from_time_t(epoch);
     entries.push_back(std::move(e));
   }
 

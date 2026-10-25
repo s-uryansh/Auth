@@ -1,5 +1,5 @@
 #pragma once
-
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -11,6 +11,7 @@ struct VaultEntry {
   std::string username;
   std::vector<uint8_t> password;
   std::vector<uint8_t> salt;
+  std::chrono::system_clock::time_point lastModified{std::chrono::system_clock::now()};
 };
 
 struct Argon2Params {

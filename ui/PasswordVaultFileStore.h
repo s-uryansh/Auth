@@ -30,6 +30,9 @@ public:
     explicit PasswordVaultFileStore(QString filePath);
 
     bool exists() const;
+    // Deletes the vault file. Used only for a corrupted vault that can never be
+    // decrypted again; the caller is responsible for confirming with the user.
+    bool remove();
     PasswordVaultFile load() const override;
     void save(const PasswordVaultFile &vault) const override;
     std::vector<uint8_t> authenticatedData(

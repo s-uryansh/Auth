@@ -10,6 +10,7 @@
 
 #include <openssl/evp.h>
 
+#include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -22,7 +23,8 @@ auth::VaultEntry makeEntry(const std::string &website,
                            const std::string &username,
                            std::vector<std::uint8_t> password,
                            std::vector<std::uint8_t> salt) {
-    return {website, username, std::move(password), std::move(salt)};
+    return {website, username, std::move(password), std::move(salt),
+            std::chrono::system_clock::now()};
 }
 
 std::vector<uint8_t> encryptLegacyVaultWithoutAad(

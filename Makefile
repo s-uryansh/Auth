@@ -19,6 +19,13 @@ CTEST_BIN ?= ctest
 ANDROID_NDK ?= $(if $(ANDROID_NDK_HOME),$(ANDROID_NDK_HOME),$(ANDROID_NDK_ROOT))
 ANDROID_SDK_ROOT ?= $(HOME)/Android/Sdk
 GRADLE_USER_HOME ?= $(HOME)/.gradle
+# Gradle's Java toolchain resolution requires a JDK that advertises the
+# JAVA_COMPILER capability. The image's default java/javac (OpenJDK 25) does
+# not, which fails the APK packaging step with
+#   Toolchain installation ... does not provide the required capabilities: [JAVA_COMPILER]
+# OpenJDK 17 is the lowest version verified to work here. Override with
+#   make android JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+JAVA_HOME ?= /usr/lib/jvm/java-17-openjdk-amd64
 QT_ANDROID_PREFIX ?= /home/s-uryansh/Qt/6.12.0/android_arm64_v8a
 QT_HOST_PREFIX ?= /home/s-uryansh/Qt/6.12.0/gcc_64
 
@@ -82,6 +89,7 @@ demo: desktop-build
 
 clean:
 	@rm -rf "$(BUILD_DIR)"
+	@rm -rf "$(ANDROID_BUILD_DIR)"
 
 # ---------- Android ----------
 
@@ -104,14 +112,14 @@ android-package: preflight-android
 		-DQt6_DIR="$(QT_ANDROID_PREFIX)/lib/cmake/Qt6" \
 		-DQt6Core_DIR="$(QT_ANDROID_PREFIX)/lib/cmake/Qt6Core" \
 		-DQt6Gui_DIR="$(QT_ANDROID_PREFIX)/lib/cmake/Qt6Gui" \
+		-DQt6Concurrent_DIR="$(QT_ANDROID_PREFIX)/lib/cmake/Qt6Concurrent" \
+		-DQt6Network_DIR="$(QT_ANDROID_PREFIX)/lib/cmake/Qt6Network" \
+		-DQt6Multimedia_DIR="$(QT_ANDROID_PREFIX)/lib/cmake/Qt6Multimedia" \
 		-DQt6Widgets_DIR="$(QT_ANDROID_PREFIX)/lib/cmake/Qt6Widgets" \
 		-DQt6Svg_DIR="$(QT_ANDROID_PREFIX)/lib/cmake/Qt6Svg" \
 		-DQT_HOST_PATH="$(QT_HOST_PREFIX)"
-	@GRADLE_USER_HOME="$(GRADLE_USER_HOME)" "$(CMAKE_BIN)" --build "$(ANDROID_BUILD_DIR)" --target AuthQt_make_apk
+	@GRADLE_USER_HOME="$(GRADLE_USER_HOME)" JAVA_HOME="$(JAVA_HOME)" "$(CMAKE_BIN)" --build "$(ANDROID_BUILD_DIR)" --target AuthQt_make_apk
 	@test -f "$(ANDROID_APK_PATH)"
-
-android-clean:
-	@rm -rf "$(ANDROID_BUILD_DIR)"
 
 setup:
 	@PROJECT_ROOT="$(CURDIR)" VCPKG_ROOT="$(VCPKG_ROOT)" \

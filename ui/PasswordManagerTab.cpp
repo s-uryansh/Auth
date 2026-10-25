@@ -37,6 +37,25 @@ QString normalizedWebsite(const QString &raw_website) {
     return url.toString(QUrl::FullyEncoded);
 }
 
+QString promptForSyncPin(QWidget *parent, const QString &title,
+                         const QString &label, bool &accepted) {
+    QInputDialog dialog(parent);
+    dialog.setWindowTitle(title);
+    dialog.setLabelText(label);
+    dialog.setInputMode(QInputDialog::TextInput);
+    dialog.setTextEchoMode(QLineEdit::Password);
+    if (auto *input = dialog.findChild<QLineEdit *>())
+        input->setInputMethodHints(Qt::ImhDigitsOnly);
+    accepted = dialog.exec() == QDialog::Accepted;
+    return dialog.textValue();
+}
+
+bool isValidSyncPin(const QString &pin) {
+    return pin.size() >= 4 && std::all_of(pin.cbegin(), pin.cend(),
+        [](QChar character) { return character >= QLatin1Char('0') &&
+                                     character <= QLatin1Char('9'); });
+}
+
 std::vector<uint8_t> deriveKeyFromText(
     const QString &text,
     const std::vector<uint8_t> &salt,
@@ -68,6 +87,7 @@ PasswordManagerTab::PasswordManagerTab(QWidget *parent)
       add_btn_(new QPushButton("Add Credential", add_page_)),
       show_browse_btn_(new QPushButton("View Saved Passwords", add_page_)),
       show_add_btn_(new QPushButton("Add Credential", browse_page_)),
+      delete_vault_btn_(new QPushButton("Delete Vault", browse_page_)),
       search_input_(new QLineEdit(browse_page_)),
       website_list_(new QListWidget(browse_page_)),
       credential_cards_widget_(new QWidget),
@@ -112,6 +132,8 @@ PasswordManagerTab::PasswordManagerTab(QWidget *parent)
     credential_details_->setWidget(credential_cards_widget_);
     browse_layout->addWidget(credential_details_, 1);
     browse_layout->addWidget(show_add_btn_);
+    browse_layout->addWidget(delete_vault_btn_);
+    delete_vault_btn_->hide(); // only shown when the vault is unreadable
     session_timer_->setInterval(1000);
 
     pages_->addWidget(setup_page_);
@@ -130,6 +152,8 @@ PasswordManagerTab::PasswordManagerTab(QWidget *parent)
             this, &PasswordManagerTab::onShowBrowseClicked);
     connect(show_add_btn_, &QPushButton::clicked,
             this, &PasswordManagerTab::onShowAddClicked);
+    connect(delete_vault_btn_, &QPushButton::clicked,
+            this, &PasswordManagerTab::onDeleteVaultClicked);
     connect(website_list_, &QListWidget::itemClicked,
             this, &PasswordManagerTab::onWebsiteClicked);
     connect(search_input_, &QLineEdit::textChanged,
@@ -163,8 +187,9 @@ PasswordManagerTab::PasswordManagerTab(QWidget *parent)
         updateStatus("Vault locked");
     } catch (const std::exception &e) {
         pages_->setCurrentWidget(browse_page_);
-        browse_placeholder_->setText("The saved vault could not be read.");
+        browse_placeholder_->setText("The saved vault is corrupted.");
         show_add_btn_->setEnabled(false);
+        delete_vault_btn_->show();
         updateStatus(QString::fromUtf8(e.what()));
     }
 }
@@ -243,6 +268,105 @@ void PasswordManagerTab::onSetupClicked() {
         QMessageBox::critical(this, "Vault Setup Failed",
                               QString::fromUtf8(e.what()));
         updateStatus("Vault setup failed");
+    }
+}
+
+bool PasswordManagerTab::createVaultForSync(QString &error) {
+    bool accepted = false;
+    const QString master = promptForSyncPin(
+        this, "Set Up This Device's Vault", "New vault PIN (at least 4 digits):", accepted);
+    if (!accepted) {
+        error = "Vault setup was cancelled";
+        return false;
+    }
+    const QString confirmation = promptForSyncPin(
+        this, "Confirm Vault PIN", "Re-enter vault PIN:", accepted);
+    if (!accepted || confirmation != master) {
+        error = "Master passwords did not match";
+        return false;
+    }
+    if (!isValidSyncPin(master)) {
+        error = "Vault PIN must be at least 4 digits and contain only numbers";
+        return false;
+    }
+
+    try {
+        PasswordVaultFile vault;
+        vault.salt = auth::GenerateSalt();
+        vault.params = auth::kDefaultArgon2Params;
+        std::vector<uint8_t> key = deriveKeyFromText(master, vault.salt,
+                                                     vault.params);
+        vault.ciphertext = auth::EncryptVault(
+            key, {}, store_->authenticatedData(vault));
+        store_->save(vault);
+        ui::wipeBytes(active_key_);
+        active_key_ = std::move(key);
+        vault_file_ = std::move(vault);
+        vault_available_ = true;
+        viewing_unlocked_ = true;
+        session_clock_.start();
+        session_timer_->start();
+        refreshWebsiteList();
+        pages_->setCurrentWidget(browse_page_);
+        updateStatus("Vault created; importing synced credentials");
+        return true;
+    } catch (const std::exception &e) {
+        error = QString::fromUtf8(e.what());
+        return false;
+    }
+}
+
+bool PasswordManagerTab::exportVaultEntriesForSync(
+    std::vector<auth::VaultEntry> &entries, QString &error) {
+    if (!store_ || !store_->exists()) {
+        error = "Set up a password vault before syncing from this device";
+        return false;
+    }
+    if (!viewing_unlocked_ && !unlockForViewing()) {
+        error = "Unlocking the source vault was cancelled or failed";
+        return false;
+    }
+    entries = entries_;
+    if (entries.empty()) {
+        error = "The source vault has no credentials to transfer";
+        return false;
+    }
+    return true;
+}
+
+bool PasswordManagerTab::importVaultEntriesFromSync(
+    std::vector<auth::VaultEntry> entries, QString &error) {
+    struct ImportedEntriesWiper {
+        std::vector<auth::VaultEntry> &entries;
+        ~ImportedEntriesWiper() { ui::wipeVaultEntries(entries); }
+    } wipe_imported{entries};
+
+    if (!store_ || !workflow_) {
+        error = "This device's password vault is unavailable";
+        return false;
+    }
+    if (!store_->exists() && !createVaultForSync(error))
+        return false;
+    if (!viewing_unlocked_ && !unlockForViewing()) {
+        error = "Unlocking this device's vault was cancelled or failed";
+        return false;
+    }
+
+    try {
+        auto merged = workflow_->mergeImportedEntries(active_key_, entries);
+        clearEntries();
+        entries_ = std::move(merged);
+        vault_file_ = store_->load();
+        vault_available_ = true;
+        viewing_unlocked_ = true;
+        refreshWebsiteList();
+        clearCredentialCards();
+        updateStatus(QString("Vault sync complete: %1 credential(s)")
+                         .arg(entries_.size()));
+        return true;
+    } catch (const std::exception &e) {
+        error = QString::fromUtf8(e.what());
+        return false;
     }
 }
 
@@ -326,6 +450,35 @@ void PasswordManagerTab::onShowBrowseClicked() {
 
 void PasswordManagerTab::onShowAddClicked() {
     pages_->setCurrentWidget(add_page_);
+}
+
+void PasswordManagerTab::onDeleteVaultClicked() {
+    // A corrupted vault cannot be decrypted (wrong master key, or the file was
+    // truncated/edited), so the only safe recovery is to delete it and start
+    // fresh. This is the last resort shown on the browse page when load() fails.
+    const int reply = QMessageBox::warning(
+        this, "Delete Vault",
+        "The saved vault is corrupted and cannot be decrypted.\n\n"
+        "Deleting it will permanently erase the saved credentials.\n"
+        "You will need to recreate the vault and re-enter every website.",
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (reply != QMessageBox::Yes) return;
+
+    if (!store_->remove()) {
+        QMessageBox::critical(this, "Could Not Delete Vault",
+                              "The vault file could not be deleted. Check the "
+                              "permissions of the application data directory.");
+        updateStatus("Vault file could not be deleted");
+        return;
+    }
+
+    vault_available_ = false;
+    vault_file_ = PasswordVaultFile{};
+    entries_.clear();
+    clearCredentialCards();
+    delete_vault_btn_->hide();
+    pages_->setCurrentWidget(setup_page_);
+    updateStatus("Corrupted vault deleted. Set a master password to start again.");
 }
 
 bool PasswordManagerTab::unlockForViewing() {

@@ -94,6 +94,8 @@ check_desktop() {
     check_file 'desktop Qt Core' "$QT_HOST_PREFIX/lib/cmake/Qt6Core/Qt6CoreConfig.cmake" QT_HOST_PREFIX
     check_file 'desktop Qt Gui' "$QT_HOST_PREFIX/lib/cmake/Qt6Gui/Qt6GuiConfig.cmake" QT_HOST_PREFIX
     check_file 'desktop Qt Widgets' "$QT_HOST_PREFIX/lib/cmake/Qt6Widgets/Qt6WidgetsConfig.cmake" QT_HOST_PREFIX
+    check_file 'desktop Qt Multimedia' "$QT_HOST_PREFIX/lib/cmake/Qt6Multimedia/Qt6MultimediaConfig.cmake" QT_HOST_PREFIX
+    check_file 'desktop Qt Network' "$QT_HOST_PREFIX/lib/cmake/Qt6Network/Qt6NetworkConfig.cmake" QT_HOST_PREFIX
     check_file 'desktop Qt Svg dependency' "$QT_HOST_PREFIX/lib/cmake/Qt6Svg/Qt6SvgConfig.cmake" QT_HOST_PREFIX
     check_file GTest "$VCPKG_INSTALLED_DIR/share/gtest/GTestConfig.cmake" VCPKG_INSTALLED_DIR
 }
@@ -105,6 +107,8 @@ check_android() {
     check_file 'Android Qt Core' "$QT_ANDROID_PREFIX/lib/cmake/Qt6Core/Qt6CoreConfig.cmake" QT_ANDROID_PREFIX
     check_file 'Android Qt Gui' "$QT_ANDROID_PREFIX/lib/cmake/Qt6Gui/Qt6GuiConfig.cmake" QT_ANDROID_PREFIX
     check_file 'Android Qt Widgets' "$QT_ANDROID_PREFIX/lib/cmake/Qt6Widgets/Qt6WidgetsConfig.cmake" QT_ANDROID_PREFIX
+    check_file 'Android Qt Multimedia' "$QT_ANDROID_PREFIX/lib/cmake/Qt6Multimedia/Qt6MultimediaConfig.cmake" QT_ANDROID_PREFIX
+    check_file 'Android Qt Network' "$QT_ANDROID_PREFIX/lib/cmake/Qt6Network/Qt6NetworkConfig.cmake" QT_ANDROID_PREFIX
     check_file 'Android Qt Svg dependency' "$QT_ANDROID_PREFIX/lib/cmake/Qt6Svg/Qt6SvgConfig.cmake" QT_ANDROID_PREFIX
     check_file 'Qt Android deployment tool' "$QT_HOST_PREFIX/bin/androiddeployqt" QT_HOST_PREFIX executable
     if [[ -n "${JAVA_HOME:-}" ]]; then
