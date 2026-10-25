@@ -16,12 +16,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config libargp-dev g++ cmake make
+          sudo apt-get install -y libssl-dev pkg-config g++ cmake make
 
       - name: Setup Qt 6
         uses: jurplel/install-qt-action@v4
@@ -70,7 +70,7 @@ jobs:
 
       - name: Upload test results on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-results
           path: build/Testing/*/Test.xml
@@ -78,7 +78,7 @@ jobs:
 
       - name: Upload QR Sync test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: qrsync-test-results
           path: build/Testing/*/QRSync*Test.xml
