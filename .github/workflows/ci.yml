@@ -28,7 +28,7 @@ jobs:
         with:
           version: '6.8.3'
           target: desktop
-          modules: 'qt5compat'
+          modules: 'qtmultimedia'
 
       - name: Cache vcpkg
         uses: actions/cache@v4

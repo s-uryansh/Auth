@@ -71,7 +71,7 @@ flowchart TD
     A[OD: Generate ML-KEM-768 keypair] --> B[OD: Show QR code with PKn]
     B --> C[ND: Scan QR code]
     C --> D[ND: Connect to OD via TCP]
-    D --> E[Both: Compute SAS = H(PKn || ID)]
+    D --> E[Both: Compute SAS from PKn and ID]
     E --> F[User: Compare SAS codes]
     F --> G[OD: User approves]
     G --> H[OD: Sign sigma_OD]
