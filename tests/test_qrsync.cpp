@@ -204,9 +204,6 @@ static std::array<uint8_t, auth::sync::kIdentityBytes> GenerateRandomId() {
   return id;
 }
 
-static std::array<uint8_t, 32> MakeZeroTranscriptHash() {
-  return {};
-}
 
 // ---------------------------------------------------------------------------
 // Test fixture
@@ -267,10 +264,10 @@ TEST_F(QRSyncTest, HappyPathFullSync) {
             std::chrono::seconds(auth::sync::kSessionExpirySeconds).count());
 
   // SAS computation must match on both sides (same inputs).
-  auto sas_nd = auth::sync::computeSAS(pk_nd, qr.id, MakeZeroTranscriptHash());
-  auto sas_od = auth::sync::computeSAS(decoded.pk_nd, decoded.id, MakeZeroTranscriptHash());
+  auto sas_nd = auth::sync::computeSAS(pk_nd, qr.id);
+  auto sas_od = auth::sync::computeSAS(decoded.pk_nd, decoded.id);
   EXPECT_EQ(sas_nd, sas_od);
-  EXPECT_EQ(sas_nd.size(), 6u);  // 6-digit decimal string
+  EXPECT_EQ(sas_nd.size(), 32u);
 
   // Simulate user SAS verification (both devices show same SAS)
   auto decision = user_agent_->verifySAS(sas_nd, sas_od);
@@ -317,8 +314,8 @@ TEST_F(QRSyncTest, MITMSwapTriggersAbort) {
   auto qr_attack  = MakePayload(pk_nd_attacker);
 
   // SAS must differ because PKn differs.
-  auto sas_good = auth::sync::computeSAS(pk_nd_good, qr_good.id, MakeZeroTranscriptHash());
-  auto sas_attack = auth::sync::computeSAS(pk_nd_attacker, qr_attack.id, MakeZeroTranscriptHash());
+  auto sas_good = auth::sync::computeSAS(pk_nd_good, qr_good.id);
+  auto sas_attack = auth::sync::computeSAS(pk_nd_attacker, qr_attack.id);
   EXPECT_NE(sas_good, sas_attack);
 
   // Simulate user detects mismatch and cancels
@@ -562,7 +559,7 @@ TEST_F(QRSyncTest, KnownDeviceFlowSucceeds) {
   EXPECT_EQ(trusted.size(), 1u);
 
   // Full sync should still succeed — known-device path still requires SAS+approval.
-  auto sas = auth::sync::computeSAS(pk_nd, qr.id, MakeZeroTranscriptHash());
+  auto sas = auth::sync::computeSAS(pk_nd, qr.id);
   auto decision = user_agent_->verifySAS(sas, sas);
   EXPECT_EQ(decision, "MATCH");
 
@@ -581,14 +578,14 @@ TEST_F(QRSyncTest, KnownDeviceFlowSucceeds) {
 TEST_F(QRSyncTest, RevocationTreatsSamePkAsNew) {
   auto [pk_nd, sk_nd] = GenerateNdKeyPair();
   auto qr = MakePayload(pk_nd);
-  auto sas_before = auth::sync::computeSAS(pk_nd, qr.id, MakeZeroTranscriptHash());
+  auto sas_before = auth::sync::computeSAS(pk_nd, qr.id);
 
   // "Revoke" by clearing the trusted list.
   std::vector<std::array<uint8_t, auth::internal::kMlKem768PkBytes>> trusted;
   // trusted is empty now.
 
   // Re-run sync with the same pk_nd — SAS must still match (new pairing).
-  auto sas_after = auth::sync::computeSAS(pk_nd, qr.id, MakeZeroTranscriptHash());
+  auto sas_after = auth::sync::computeSAS(pk_nd, qr.id);
   EXPECT_EQ(sas_before, sas_after);  // same pk+id -> same SAS
 
   // The vault transfer itself must also succeed.
@@ -663,8 +660,8 @@ TEST_F(QRSyncTest, SessionKeysAreZeroizedAfterSync) {
   auto qr = MakePayload(pk_nd);
 
   // Capture the SAS before cleanup.
-  auto sas = auth::sync::computeSAS(pk_nd, qr.id, MakeZeroTranscriptHash());
-  EXPECT_EQ(sas.size(), 6u);
+  auto sas = auth::sync::computeSAS(pk_nd, qr.id);
+  EXPECT_EQ(sas.size(), 32u);
 
   // Perform full transfer; all session material goes out of scope after this
   // block and should be cleaned up.
@@ -710,7 +707,7 @@ TEST_F(QRSyncTest, NoTpmPathWorks) {
 TEST_F(QRSyncTest, WireContainsNoPlaintextVaultOrSAS) {
   auto [pk_nd, sk_nd] = GenerateNdKeyPair();
   auto qr = MakePayload(pk_nd);
-  auto sas = auth::sync::computeSAS(pk_nd, qr.id, MakeZeroTranscriptHash());
+  auto sas = auth::sync::computeSAS(pk_nd, qr.id);
 
   auto wire = auth::sync::encryptVaultForTransfer(vault_entries_, pk_nd);
 
@@ -751,7 +748,7 @@ TEST_F(QRSyncTest, BenchmarkFullSyncCompletesWithinReasonableTime) {
 
       auto t2 = Clock::now();
       auto qr = MakePayload(pk_nd);
-      auto sas = auth::sync::computeSAS(pk_nd, qr.id, MakeZeroTranscriptHash());
+      auto sas = auth::sync::computeSAS(pk_nd, qr.id);
       auto t3 = Clock::now();
       handshake_us.push_back(
           std::chrono::duration<double, std::micro>(t3 - t2).count());

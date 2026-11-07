@@ -1,11 +1,14 @@
 #include "PasswordVaultWorkflow.h"
 
 #include "SensitiveData.h"
+#include "auth/crypto_utils.hpp"
 
 #include <stdexcept>
 #include <algorithm>
 #include <unordered_set>
 #include <utility>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 
 namespace {
 
@@ -212,4 +215,71 @@ bool PasswordVaultWorkflow::authenticate(const auth::VaultEntry &entry) {
         ui::wipeBytes(password_copy);
         return false;
     }
+}
+
+// -----------------------------------------------------------------------------
+// Trusted-device list T (Protocol 4 VaultSync) implementation
+// -----------------------------------------------------------------------------
+
+auth::VaultPayload PasswordVaultWorkflow::loadPayload(
+    const std::vector<uint8_t> &key) const {
+    const PasswordVaultFile original = storage_.load();
+    std::vector<uint8_t> plaintext = auth::DecryptVaultPayload(
+        key, original.ciphertext, storage_.authenticatedData(original));
+    auth::VaultPayload payload = auth::DeserializeVaultPayload(plaintext);
+    return payload;
+}
+
+void PasswordVaultWorkflow::savePayload(
+    const std::vector<uint8_t> &key,
+    const auth::VaultPayload &payload) {
+    // Serialize the full payload (entries + trust list) and encrypt with AAD
+    const std::vector<uint8_t> serialized = auth::SerializeVaultPayload(payload);
+    const std::vector<uint8_t> encrypted = auth::EncryptVaultPayload(
+        key, serialized, storage_.authenticatedData(storage_.load()));
+
+    PasswordVaultFile updated = storage_.load();
+    updated.ciphertext = encrypted;
+    // Update website index from entries
+    updated.websites.clear();
+    for (const auto& entry : payload.entries) {
+        appendWebsiteIfMissing(updated, entry.website);
+    }
+    storage_.save(updated);
+}
+
+std::vector<PasswordVaultWorkflow::TrustedDeviceKey> PasswordVaultWorkflow::listTrustedDevices(
+    const std::vector<uint8_t> &key) const {
+    auth::VaultPayload payload = loadPayload(key);
+    return payload.trusted_devices;
+}
+
+void PasswordVaultWorkflow::addTrustedDevice(const std::vector<uint8_t> &key,
+                                             const TrustedDeviceKey &device_key) {
+    auth::VaultPayload payload = loadPayload(key);
+    // Idempotent: check if already present
+    if (std::find(payload.trusted_devices.begin(), payload.trusted_devices.end(), device_key)
+        == payload.trusted_devices.end()) {
+        payload.trusted_devices.push_back(device_key);
+        savePayload(key, payload);
+    }
+}
+
+bool PasswordVaultWorkflow::isDeviceTrusted(const std::vector<uint8_t> &key,
+                                            const TrustedDeviceKey &device_key) const {
+    auth::VaultPayload payload = loadPayload(key);
+    return std::find(payload.trusted_devices.begin(), payload.trusted_devices.end(), device_key)
+           != payload.trusted_devices.end();
+}
+
+bool PasswordVaultWorkflow::revokeTrustedDevice(const std::vector<uint8_t> &key,
+                                                const TrustedDeviceKey &device_key) {
+    auth::VaultPayload payload = loadPayload(key);
+    auto it = std::find(payload.trusted_devices.begin(), payload.trusted_devices.end(), device_key);
+    if (it == payload.trusted_devices.end()) {
+        return false;
+    }
+    payload.trusted_devices.erase(it);
+    savePayload(key, payload);
+    return true;
 }

@@ -1,45 +1,75 @@
 #pragma once
-#include <QLabel>
+
+#include <QWidget>
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QFutureWatcher>
-#include <QLineEdit>
-#include <QPushButton>
-#include <QScrollArea>
-#include <QStackedWidget>
-#include <QTimer>
-#include <QWidget>
-#include <QTcpServer>
-#include <QTcpSocket>
 #include <QVideoFrame>
-#include <memory>
-#include <vector>
-#include <array>
+#include <QTimer>
+#include <QString>
 
-#include "auth/vault.hpp"
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "auth/sync_protocol.hpp"
 #include "auth/sync_tpm.hpp"
+#include "auth/tpm2.hpp"
 #include "auth/server_keys.hpp"
+#include "auth/vault.hpp"
 #include "PasswordVaultFileStore.h"
 #include "PasswordVaultWorkflow.h"
 
+class QLabel;
+class QPushButton;
+class QStackedWidget;
 class QCamera;
 class QMediaCaptureSession;
 class QVideoSink;
-class PasswordManagerTab;
+class QTcpServer;
+class QTcpSocket;
+class QTimer;
+class QMessageBox;
 
+class PasswordManagerTab;
+class QRSyncTabTestAccess;
+
+// QR Sync dialog implementing Protocol 4 from TMPS_Auth.pdf.
+//
+// Protocol 4 flow:
+//   1. OD (Old Device, vault holder) generates ML-KEM-768 keypair, Session ID,
+//      Expiry, ConnInfo — displays QR code.
+//   2. ND (New Device, empty vault) scans QR, connects to OD via TCP.
+//   3. Both compute SAS = H(PK_n ∥ ID) [full 32-byte SHA-256] and display for
+//      out-of-band visual comparison (SAS never sent over network).
+//   4. OD user approves → OD signs σOD = Sign(skOD, H(ID′∥T′∥PKn′)) via TPM
+//      → sends ID′, T′, PKn′, pkOD, σOD.
+//   5. ND verifies σOD via TPM.
+//   6. ND signs σND = Sign(skND, H(SAS ∥ PKn ∥ ID)) via TPM → sends pkND, σND.
+//   7. OD verifies σND via TPM.
+//   8. OD encapsulates: (Ks, Kem) ← ML-KEM-768.Encaps(PKn), encrypts vault
+//      with AES-256-GCM under Ks, sends Kem and E_Vtr.
+//   9. ND decapsulates Ks ← ML-KEM-768.Decaps(SKn, Kem), decrypts vault,
+//      merges entries.
+//
+// QR direction: OD (vault holder) shows QR, ND (empty vault) scans it.
 class QRSyncTab : public QWidget {
     Q_OBJECT
+
 public:
-    explicit QRSyncTab(PasswordManagerTab *passwordManager, QWidget *parent = nullptr);
+    explicit QRSyncTab(PasswordManagerTab *password_manager,
+                       QWidget *parent = nullptr);
     ~QRSyncTab() override;
 
 signals:
-    void syncStarted();        // notify other tabs
-    void syncFinished(bool success, const QString& message);
-    void deviceRegistered(const QString& deviceName);
+    void syncStarted();
+    void syncFinished(bool success, const QString &message);
+    void deviceRegistered(const QString &device_id);
 
 public slots:
-    void onAddDeviceClicked();
     void onStartClicked();
     void onCancelClicked();
     void onRefreshQRClicked();
@@ -48,119 +78,155 @@ public slots:
     void onApproveClicked();
     void onDoneClicked();
     void onScanQRClicked();
-    void onRoleSelected(bool newDevice);
+    void onRoleSelected(bool old_device);
 
 private:
-    enum class Screen { Role, Setup, WaitingQR, Scanning, Connected, SAS, ApprovingOD, ApprovingND, Transferring, Done, Error };
-    void switchScreen(Screen s);
-    void updateStatus(const QString& text);
-    void showError(const QString& msg);
-    void wipeSession();
-    std::string formatSAS(const std::string& raw);
-    void renderQRBitmap(const std::vector<uint8_t>& qrData);
-    std::vector<auth::VaultEntry> loadLocalVault();
-    void saveLocalVault(const std::vector<auth::VaultEntry>& entries);
+    friend class QRSyncTabTestAccess;
 
-    // ND state
-    Screen current_screen_ = Screen::Setup;
-    QTimer* timer_;
-    QElapsedTimer session_timer_;
+    enum Screen {
+        Role,
+        Setup,
+        WaitingQR,
+        Scanning,
+        Connected,
+        SAS,
+        ApprovingOD,
+        ApprovingND,
+        Transferring,
+        Done,
+        Error
+    };
+
+    void switchScreen(Screen screen);
+    void updateStatus(const QString &status);
+    void showError(const QString &message);
+    void wipeSession();
+    void updateSessionCountdown();
+    void expireSession();
+    bool isSessionExpired() const;
+    QString formatSAS(const std::string &sas);
+    void renderQRBitmap(const std::vector<uint8_t> &data);
+    std::vector<auth::VaultEntry> loadLocalVault();
+    void saveLocalVault(const std::vector<auth::VaultEntry> &entries);
+    QByteArray sessionId() const;
+    void createClientSocket();
+    void sendPlainFrame(quint8 type, const QByteArray &payload);
+    void handleSocketData();
+    void handleSocketFrame(quint8 type, const QByteArray &peer_session_id,
+                           const QByteArray &body);
+    void startCameraScanner();
+    void stopCameraScanner();
+    void processCameraFrame(const QVideoFrame &frame);
+    void handleScannedQr(const std::vector<uint8_t> &qr_data);
+
+    // New Device state (scanner side)
     auth::sync::QRPayload qr_payload_;
-    std::array<uint8_t, auth::internal::kMlKem768PkBytes> pk_nd_;
-    std::array<uint8_t, auth::internal::kMlKem768SkBytes> sk_nd_;
-    std::array<uint8_t, auth::sync::kIdentityBytes> id_;
+    std::array<uint8_t, 1184> pk_nd_;
+    std::array<uint8_t, 2400> sk_nd_;
+    std::array<uint8_t, 16> id_;
     std::chrono::system_clock::time_point expiry_;
     std::string sas_code_;
-    std::unique_ptr<auth::sync::SoftwareTpm> tpm_;
-    std::unique_ptr<PasswordVaultFileStore> store_;
-    std::unique_ptr<PasswordVaultWorkflow> workflow_;
+    auth::sync::SessionSecrets session_;
+    auth::sync::NdAuthorization nd_auth_;
+
+    // Old Device state (QR display side)
+    std::array<uint8_t, 1184> od_pk_nd_;
+    std::array<uint8_t, 16> od_id_;
+    std::chrono::system_clock::time_point od_expiry_;
+    std::string od_sas_code_;
+    auth::sync::SessionSecrets od_session_;
+    auth::sync::NdAuthorization od_auth_;
+    std::vector<uint8_t> od_pk_od_;
+    std::vector<uint8_t> od_sigma_od_;
+
+    // Shared state
+    std::vector<uint8_t> noise_key_;
+    std::unique_ptr<auth::sync::TpmInterface> tpm_;
+    PasswordManagerTab *password_manager_ = nullptr;
 
     // UI widgets
-    QStackedWidget* pages_;
-    QWidget* role_page_;
-    QWidget* setup_page_;
-    QWidget* waiting_qr_page_;
-    QWidget* scanning_page_;
-    QWidget* connected_page_;
-    QWidget* sas_page_;
-    QWidget* approving_page_;
-    QWidget* approving_nd_page_;
-    QWidget* transferring_page_;
-    QWidget* done_page_;
-    QWidget* error_page_;
+    QStackedWidget *pages_ = nullptr;
 
-    QLabel* qr_label_;
-    QLabel* countdown_label_;
-    QLabel* scanner_status_label_;
-    QLabel* scanner_countdown_label_;
-    QLabel* camera_preview_;
-    QLabel* status_label_;
-    QLabel* sas_label_;
-    QLabel* error_label_;
-    QPushButton* refresh_btn_;
-    QPushButton* match_btn_;
-    QPushButton* differ_btn_;
-    QPushButton* approve_btn_;
-    QPushButton* done_btn_;
-    QLabel* transfer_progress_;
-    QLabel* connected_status_label_;
-    QLabel* approving_status_label_;
-    QLabel* approving_nd_status_label_;
-    QPushButton* approving_approve_btn_;
-    QPushButton* approving_cancel_btn_;
-    QPushButton* start_btn_;
+    QWidget *role_page_ = nullptr;
+    QLabel *role_label_ = nullptr;
+    QPushButton *new_device_btn_ = nullptr;
+    QPushButton *old_device_btn_ = nullptr;
 
-    // OD state (populated after scan)
-    bool od_mode_ = false; // Old device mode (scanning QR)
-    std::string od_sas_; // SAS code from old device
-    std::vector<uint8_t> od_qr_bytes_; // Scanned QR data
-    std::array<uint8_t, auth::internal::kMlKem768PkBytes> od_pk_n_; // Old device's public key
-    std::chrono::system_clock::time_point od_expiry_; // Old device's session expiry
-    std::vector<uint8_t> od_sigma_od_; // Old device's TPM signature
-    std::vector<uint8_t> od_pk_od_; // Old device's TPM public key
-    std::vector<uint8_t> od_ephemeral_; // Old device's ephemeral key for handshake
-    bool has_tpm_ = false; // Whether device has TPM
-    bool has_camera_ = false; // Whether a camera feed is available for QR scanning
-    QCamera* camera_ = nullptr;
-    QMediaCaptureSession* capture_session_ = nullptr;
-    QVideoSink* video_sink_ = nullptr;
-    QFutureWatcher<QByteArray>* decode_watcher_ = nullptr;
-    QElapsedTimer preview_timer_;
-    QElapsedTimer decode_timer_;
+    QWidget *setup_page_ = nullptr;
+    QLabel *setup_label_ = nullptr;
+    QPushButton *start_btn_ = nullptr;
+
+    QWidget *waiting_qr_page_ = nullptr;
+    QLabel *waiting_qr_label_ = nullptr;
+    QLabel *qr_label_ = nullptr;
+    QLabel *qr_countdown_label_ = nullptr;
+    QPushButton *refresh_qr_btn_ = nullptr;
+
+    QWidget *scanning_page_ = nullptr;
+    QLabel *scanning_label_ = nullptr;
+    QLabel *scanner_countdown_label_ = nullptr;
+    QLabel *camera_viewfinder_ = nullptr;
+    QPushButton *scan_qr_btn_ = nullptr;
+    QPushButton *scan_cancel_btn_ = nullptr;
+
+    QWidget *connected_page_ = nullptr;
+    QLabel *connected_label_ = nullptr;
+    QPushButton *connected_cancel_btn_ = nullptr;
+
+    QWidget *sas_page_ = nullptr;
+    QLabel *sas_label_ = nullptr;
+    QLabel *od_sas_label_ = nullptr;
+    QPushButton *codes_match_btn_ = nullptr;
+    QPushButton *codes_differ_btn_ = nullptr;
+    QPushButton *sas_cancel_btn_ = nullptr;
+
+    QWidget *approving_od_page_ = nullptr;
+    QLabel *approving_od_label_ = nullptr;
+    QPushButton *od_approve_btn_ = nullptr;
+    QPushButton *od_approve_cancel_btn_ = nullptr;
+
+    QWidget *approving_nd_page_ = nullptr;
+    QLabel *approving_nd_label_ = nullptr;
+    QPushButton *nd_approve_btn_ = nullptr;
+    QPushButton *nd_approve_cancel_btn_ = nullptr;
+
+    QWidget *transferring_page_ = nullptr;
+    QLabel *transferring_label_ = nullptr;
+    QPushButton *transfer_cancel_btn_ = nullptr;
+
+    QWidget *done_page_ = nullptr;
+    QLabel *done_label_ = nullptr;
+    QPushButton *done_btn_ = nullptr;
+
+    QWidget *error_page_ = nullptr;
+    QLabel *error_label_ = nullptr;
+    QPushButton *error_retry_btn_ = nullptr;
+
+    QLabel *status_label_ = nullptr;
+
+    QCamera *camera_ = nullptr;
+    QMediaCaptureSession *capture_session_ = nullptr;
+    QVideoSink *video_sink_ = nullptr;
+    QFutureWatcher<QByteArray> *decode_watcher_ = nullptr;
+    QTimer *expiry_timer_ = nullptr;
+    QElapsedTimer preview_elapsed_;
+    QElapsedTimer decode_elapsed_;
+    QElapsedTimer session_elapsed_;
+    qint64 session_duration_ms_ = 0;
     quint64 scan_generation_ = 0;
     quint64 decode_generation_ = 0;
     unsigned int decode_attempts_ = 0;
     bool decode_pending_ = false;
-    PasswordManagerTab* password_manager_ = nullptr;
-    QTcpServer* sync_server_ = nullptr;
-    QTcpSocket* sync_socket_ = nullptr;
+    bool has_camera_ = false;
+
+    QTcpServer *server_ = nullptr;
+    QTcpSocket *socket_ = nullptr;
     QByteArray socket_rx_;
-    std::vector<auth::VaultEntry> transfer_entries_;
+    QByteArray vault_data_;
+
+    bool od_mode_ = false;
     bool new_device_approved_ = false;
     bool old_device_approved_ = false;
     bool qr_decoded_ = false;
-    bool is_known_device_ = false; // Whether device is already trusted
-    std::vector<uint8_t> vault_data_; // Buffer for vault transfer data
-
-    // Edge case handlers from Sec 6
-    void handleQRExpired();
-    void handleNoCamera();
-    void handleNetworkError();
-    void handleSessionReuse();
-    void handleVaultLocked();
-    void handleSelfPair();
-    void handleInvalidQR();
-    void handleKnownDevice();
-    void handleTooManyAttempts();
-    void handleNoTPM();
-    void startCameraScanner();
-    void stopCameraScanner();
-    void processCameraFrame(const QVideoFrame& frame);
-    void handleScannedQr(const std::vector<uint8_t>& bytes);
-    void decodeError(const QString& message);
-    void handleSocketData();
-    void handleSocketFrame(quint8 type, const QByteArray& body);
-    void sendFrame(quint8 type, const QByteArray& body = {});
-    void startTransferIfApproved();
-    void closeTransport();
+    std::vector<auth::VaultEntry> transfer_entries_;
 };

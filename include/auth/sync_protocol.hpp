@@ -5,6 +5,7 @@
 #pragma once
 
 #include <oqs/kem.h>
+#include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 
@@ -16,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -48,34 +50,22 @@ struct QRPayload {
   std::chrono::system_clock::time_point expiry;
 };
 
-// SAS computation: H(PKn || ID || transcript_hash) truncated to 6 digits
+// SAS computation: H(PKn || ID) full SHA-256 hash (Protocol 4, Section IV-B).
+// No transcript input — the SAS binds only to the out-of-band key and the session ID.
 inline std::string computeSAS(const std::array<uint8_t, 1184>& pk,
-                              const std::array<uint8_t, kIdentityBytes>& id,
-                              const std::array<uint8_t, 32>& transcript_hash) {
+                              const std::array<uint8_t, kIdentityBytes>& id) {
   std::vector<uint8_t> input;
   input.insert(input.end(), pk.begin(), pk.end());
   input.insert(input.end(), id.begin(), id.end());
-  input.insert(input.end(), transcript_hash.begin(), transcript_hash.end());
-
-  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-  if (!ctx) throw std::runtime_error("EVP_MD_CTX_new failed");
 
   std::array<uint8_t, 32> hash{};
-  if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
-      EVP_DigestUpdate(ctx, input.data(), input.size()) != 1 ||
-      EVP_DigestFinal_ex(ctx, hash.data(), nullptr) != 1) {
-    EVP_MD_CTX_free(ctx);
+  unsigned int len = 0;
+  if (EVP_Digest(input.data(), input.size(), hash.data(), &len, EVP_sha256(), nullptr) != 1 ||
+      len != 32) {
     throw std::runtime_error("SHA-256 failed");
   }
-  EVP_MD_CTX_free(ctx);
 
-  // Take first 4 bytes, convert to 6-digit decimal
-  uint32_t val = ((uint32_t)hash[0] << 24) | ((uint32_t)hash[1] << 16) |
-                 ((uint32_t)hash[2] << 8) | hash[3];
-  uint32_t truncated = val % 1000000;
-  char buf[7];
-  std::snprintf(buf, sizeof(buf), "%06lu", (unsigned long)truncated);
-  return std::string(buf, 6);
+  return std::string(hash.begin(), hash.end());
 }
 
 // QR serialization: magic(2) + version(1) + ID(16) + PKND(1184) + connLen(2) + conn + expiry(8)
@@ -167,11 +157,26 @@ inline QRPayload deserializeQR(const std::vector<uint8_t>& data) {
   return qr;
 }
 
-// KEM-based encrypt: encapsulate under target public key, then AES-GCM encrypt
+// Scan pairing QR: deserialize and verify expiry against now
+inline QRPayload scanPairingQR(const std::vector<uint8_t>& encoded,
+                               std::chrono::system_clock::time_point now) {
+  QRPayload qr = deserializeQR(encoded);
+  if (qr.expiry <= now) {
+    throw std::runtime_error("QR expired");
+  }
+  return qr;
+}
+
+namespace internal {
+
+// KEM-based encrypt: encapsulate under target public key, then AES-GCM encrypt.
+// If aad is provided, it is bound as AES-GCM additional authenticated data.
 // Returns: kem_ct(1088) || iv(12) || tag(16) || aead_ct
-inline std::vector<uint8_t> encryptVaultForTransfer(
+inline std::vector<uint8_t> encryptVaultForTransferImpl(
     const std::vector<VaultEntry>& entries,
-    const std::array<uint8_t, 1184>& pk_target) {
+    const std::array<uint8_t, 1184>& pk_target,
+    const uint8_t* aad,
+    size_t aad_len) {
   auto serialized = SerializeVault(entries);
 
   OQS_KEM* kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
@@ -194,7 +199,10 @@ inline std::vector<uint8_t> encryptVaultForTransfer(
   }
 
   EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-  if (!ctx) { OPENSSL_cleanse(ss.data(), ss.size()); throw std::runtime_error("EVP_CIPHER_CTX_new failed"); }
+  if (!ctx) {
+    OPENSSL_cleanse(ss.data(), ss.size());
+    throw std::runtime_error("EVP_CIPHER_CTX_new failed");
+  }
 
   if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1 ||
@@ -205,12 +213,19 @@ inline std::vector<uint8_t> encryptVaultForTransfer(
   }
   OPENSSL_cleanse(ss.data(), ss.size());
 
-  std::vector<uint8_t> ciphertext(serialized.size());
   int outlen = 0;
+  if (aad != nullptr && aad_len > 0) {
+    if (EVP_EncryptUpdate(ctx, nullptr, &outlen, aad, static_cast<int>(aad_len)) != 1) {
+      EVP_CIPHER_CTX_free(ctx);
+      throw std::runtime_error("EVP_EncryptUpdate (AAD) failed");
+    }
+  }
+
+  std::vector<uint8_t> ciphertext(serialized.size());
+  outlen = 0;
   if (!serialized.empty() &&
       EVP_EncryptUpdate(ctx, ciphertext.data(), &outlen,
-                        serialized.data(), (int)serialized.size()) != 1) {
-    OPENSSL_cleanse(ss.data(), ss.size());
+                        serialized.data(), static_cast<int>(serialized.size())) != 1) {
     EVP_CIPHER_CTX_free(ctx);
     throw std::runtime_error("EVP_EncryptUpdate failed");
   }
@@ -237,11 +252,13 @@ inline std::vector<uint8_t> encryptVaultForTransfer(
   return wire;
 }
 
-// KEM-based decrypt: decapsulate then AES-GCM decrypt
-inline std::vector<VaultEntry> decryptVaultFromTransfer(
+// KEM-based decrypt: decapsulate then AES-GCM decrypt.
+// If aad is provided, it is bound as AES-GCM additional authenticated data.
+inline std::vector<VaultEntry> decryptVaultFromTransferImpl(
     const std::vector<uint8_t>& wire,
-    const std::array<uint8_t, 2400>& sk_target) {
-
+    const std::array<uint8_t, 2400>& sk_target,
+    const uint8_t* aad,
+    size_t aad_len) {
   if (wire.size() < 1088 + 12 + 16)
     throw std::runtime_error("Wire too short for vault transfer");
 
@@ -262,7 +279,10 @@ inline std::vector<VaultEntry> decryptVaultFromTransfer(
   OQS_KEM_free(kem);
 
   EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-  if (!ctx) { OPENSSL_cleanse(ss.data(), ss.size()); throw std::runtime_error("EVP_CIPHER_CTX_new failed"); }
+  if (!ctx) {
+    OPENSSL_cleanse(ss.data(), ss.size());
+    throw std::runtime_error("EVP_CIPHER_CTX_new failed");
+  }
 
   if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1 ||
@@ -272,9 +292,18 @@ inline std::vector<VaultEntry> decryptVaultFromTransfer(
     throw std::runtime_error("EVP_DecryptInit_ex failed");
   }
 
-  std::vector<uint8_t> plaintext(ct_len + 16);
   int outlen = 0;
-  if (EVP_DecryptUpdate(ctx, plaintext.data(), &outlen, ct_ptr, (int)ct_len) != 1) {
+  if (aad != nullptr && aad_len > 0) {
+    if (EVP_DecryptUpdate(ctx, nullptr, &outlen, aad, static_cast<int>(aad_len)) != 1) {
+      OPENSSL_cleanse(ss.data(), ss.size());
+      EVP_CIPHER_CTX_free(ctx);
+      throw std::runtime_error("EVP_DecryptUpdate (AAD) failed");
+    }
+  }
+
+  std::vector<uint8_t> plaintext(ct_len + 16);
+  outlen = 0;
+  if (EVP_DecryptUpdate(ctx, plaintext.data(), &outlen, ct_ptr, static_cast<int>(ct_len)) != 1) {
     OPENSSL_cleanse(ss.data(), ss.size());
     EVP_CIPHER_CTX_free(ctx);
     throw std::runtime_error("EVP_DecryptUpdate failed");
@@ -298,6 +327,52 @@ inline std::vector<VaultEntry> decryptVaultFromTransfer(
 
   plaintext.resize(outlen + final_len);
   return DeserializeVault(plaintext);
+}
+
+}  // namespace internal
+
+inline std::vector<uint8_t> encryptVaultForTransfer(
+    const std::vector<VaultEntry>& entries,
+    const std::array<uint8_t, 1184>& pk_target) {
+  return internal::encryptVaultForTransferImpl(entries, pk_target, nullptr, 0);
+}
+
+inline std::vector<uint8_t> encryptVaultForTransfer(
+    const std::vector<VaultEntry>& entries,
+    const std::array<uint8_t, 1184>& pk_target,
+    const std::array<uint8_t, kIdentityBytes>& session_id) {
+  return internal::encryptVaultForTransferImpl(
+      entries, pk_target, session_id.data(), session_id.size());
+}
+
+inline std::vector<VaultEntry> decryptVaultFromTransfer(
+    const std::vector<uint8_t>& wire,
+    const std::array<uint8_t, 2400>& sk_target) {
+  return internal::decryptVaultFromTransferImpl(wire, sk_target, nullptr, 0);
+}
+
+inline std::vector<VaultEntry> decryptVaultFromTransfer(
+    const std::vector<uint8_t>& wire,
+    const std::array<uint8_t, 2400>& sk_target,
+    const std::array<uint8_t, kIdentityBytes>& session_id) {
+  return internal::decryptVaultFromTransferImpl(
+      wire, sk_target, session_id.data(), session_id.size());
+}
+
+// ML-KEM-768 decapsulate: OD decapsulates Kem using its secret key to recover
+// the shared secret Ks.
+inline std::array<uint8_t, 32> kemDecapsulate(
+    const std::array<uint8_t, 2400>& sk_target,
+    const std::vector<uint8_t>& kem_ct) {
+  std::array<uint8_t, 32> ss{};
+  OQS_KEM* kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+  if (!kem) throw std::runtime_error("OQS_KEM_new failed");
+  if (OQS_KEM_decaps(kem, ss.data(), kem_ct.data(), sk_target.data()) != OQS_SUCCESS) {
+    OQS_KEM_free(kem);
+    throw std::runtime_error("OQS_KEM_decaps failed");
+  }
+  OQS_KEM_free(kem);
+  return ss;
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +437,211 @@ inline bool sessionAcceptable(const SessionSecrets& session,
                               const std::array<uint8_t, kIdentityBytes>& peer_id,
                               std::chrono::system_clock::time_point now) {
   return session.id == peer_id && now < session.expiry && !session.used;
+}
+
+// Phase B: New Device Session
+struct NewDeviceSession {
+  SessionSecrets secrets;
+  QRPayload qr;
+};
+
+inline NewDeviceSession beginNewDeviceSession(
+    const std::string& conn_info,
+    std::chrono::system_clock::time_point now,
+    std::chrono::seconds lifetime) {
+  NewDeviceSession s;
+  if (RAND_bytes(s.secrets.id.data(), static_cast<int>(s.secrets.id.size())) != 1) {
+    throw std::runtime_error("RAND_bytes failed for session ID");
+  }
+
+  OQS_KEM* kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+  if (!kem) throw std::runtime_error("OQS_KEM_new failed");
+  if (OQS_KEM_keypair(kem, s.secrets.pk_nd.data(), s.secrets.sk_nd.data()) != OQS_SUCCESS) {
+    OQS_KEM_free(kem);
+    throw std::runtime_error("OQS_KEM_keypair failed");
+  }
+  OQS_KEM_free(kem);
+
+  s.secrets.expiry = now + lifetime;
+  s.secrets.used = false;
+
+  s.qr.id = s.secrets.id;
+  s.qr.pk_nd = s.secrets.pk_nd;
+  s.qr.conn_info = conn_info;
+  s.qr.expiry = s.secrets.expiry;
+
+  return s;
+}
+
+// Phase F: Old Device Approval payload
+struct OdApproval {
+  std::array<uint8_t, kIdentityBytes> id{};
+  std::chrono::system_clock::time_point expiry{};
+  std::array<uint8_t, 1184> pk_nd{};
+  std::vector<uint8_t> device_public_key;  // pkOD
+  std::vector<uint8_t> signature;          // σOD
+};
+
+// Canonical approval digest for Old Device: H(ID || T || PKn)
+inline std::vector<uint8_t> oldDeviceApprovalDigest(
+    const std::array<uint8_t, kIdentityBytes>& id,
+    std::chrono::system_clock::time_point expiry,
+    const std::array<uint8_t, 1184>& pk_nd) {
+  const auto epoch = std::chrono::duration_cast<std::chrono::seconds>(
+      expiry.time_since_epoch()).count();
+  uint64_t epoch_u64 = static_cast<uint64_t>(epoch);
+
+  std::vector<uint8_t> input;
+  input.reserve(kIdentityBytes + 8 + 1184);
+  input.insert(input.end(), id.begin(), id.end());
+  for (int i = 7; i >= 0; --i) {
+    input.push_back(static_cast<uint8_t>((epoch_u64 >> (static_cast<uint64_t>(i) * 8)) & 0xff));
+  }
+  input.insert(input.end(), pk_nd.begin(), pk_nd.end());
+
+  std::vector<uint8_t> digest(32);
+  unsigned int len = 0;
+  if (EVP_Digest(input.data(), input.size(), digest.data(), &len, EVP_sha256(), nullptr) != 1 ||
+      len != 32) {
+    throw std::runtime_error("EVP_Digest failed in oldDeviceApprovalDigest");
+  }
+  return digest;
+}
+
+// Canonical approval digest for New Device: H(SAS || PKn || ID)
+inline std::vector<uint8_t> newDeviceApprovalDigest(
+    const std::string& sas,
+    const std::array<uint8_t, 1184>& pk_nd,
+    const std::array<uint8_t, kIdentityBytes>& id) {
+  std::vector<uint8_t> input;
+  input.reserve(sas.size() + 1184 + kIdentityBytes);
+  input.insert(input.end(), sas.begin(), sas.end());
+  input.insert(input.end(), pk_nd.begin(), pk_nd.end());
+  input.insert(input.end(), id.begin(), id.end());
+
+  std::vector<uint8_t> digest(32);
+  unsigned int len = 0;
+  if (EVP_Digest(input.data(), input.size(), digest.data(), &len, EVP_sha256(), nullptr) != 1 ||
+      len != 32) {
+    throw std::runtime_error("EVP_Digest failed in newDeviceApprovalDigest");
+  }
+  return digest;
+}
+
+// Phase F: New Device Approval payload
+struct NdApproval {
+  std::vector<uint8_t> device_public_key;  // pkND
+  std::vector<uint8_t> signature;          // σND
+};
+
+// Result of a verified approval: an unforgeable token proving the peer
+// satisfied the signature check. Only a valid token can reach the vault
+// transfer path. This is the "capability" that enforces "no vault bytes
+// before both signatures verify" at compile-/run-time.
+struct NdAuthorization {
+  std::array<uint8_t, kIdentityBytes> session_id{};
+  std::array<uint8_t, 1184> pk_nd{};
+  bool valid_ = false;
+
+  bool valid() const noexcept { return valid_; }
+  void invalidate() noexcept { valid_ = false; }
+  const std::array<uint8_t, kIdentityBytes>& sessionId() const noexcept { return session_id; }
+  const std::array<uint8_t, 1184>& ndPublicKey() const noexcept { return pk_nd; }
+};
+
+// ML-KEM-768 encapsulate: ND encapsulates to OD's public key to derive shared
+// secret Ks and KEM ciphertext Kem. ND sends Kem to OD; OD decapsulates to
+// recover Ks. Both sides then have Ks for AES-256-GCM vault encryption.
+inline std::pair<std::vector<uint8_t>, std::array<uint8_t, 32>> kemEncapsulate(
+    const std::array<uint8_t, 1184>& pk_target,
+    const NdAuthorization& auth) {
+  if (!auth.valid()) throw std::runtime_error("No valid authorization to encapsulate");
+  if (auth.pk_nd != pk_target) throw std::runtime_error("Authorization bound to different peer key");
+
+  std::vector<uint8_t> kem_ct(1088);
+  std::array<uint8_t, 32> ss{};
+  OQS_KEM* kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+  if (!kem) throw std::runtime_error("OQS_KEM_new failed");
+  if (OQS_KEM_encaps(kem, kem_ct.data(), ss.data(), pk_target.data()) != OQS_SUCCESS) {
+    OQS_KEM_free(kem);
+    throw std::runtime_error("OQS_KEM_encaps failed");
+  }
+  OQS_KEM_free(kem);
+  return {std::move(kem_ct), ss};
+}
+
+// OD verifies ND's signature (σND) and, if valid, returns a capability token
+// that the ND must present. The SAS string is the one both sides computed and
+// compared.
+inline NdAuthorization acceptOldDeviceApproval(
+    SessionSecrets& session,
+    const OdApproval& approval,
+    std::chrono::system_clock::time_point now,
+    std::function<bool(const std::vector<uint8_t>& message,
+                       const std::vector<uint8_t>& signature,
+                       const std::vector<uint8_t>& public_key)> verify_fn) {
+  if (session.id != approval.id || now >= approval.expiry ||
+      now >= session.expiry || session.used || approval.pk_nd != session.pk_nd) {
+    session.wipe();
+    session.used = true;
+    return NdAuthorization{};
+  }
+
+  const auto digest = oldDeviceApprovalDigest(approval.id, approval.expiry, approval.pk_nd);
+  if (!verify_fn || !verify_fn(digest, approval.signature, approval.device_public_key)) {
+    session.wipe();
+    session.used = true;
+    return NdAuthorization{};
+  }
+
+  session.used = true;
+  NdAuthorization auth;
+  auth.session_id = session.id;
+  auth.pk_nd = session.pk_nd;
+  auth.valid_ = true;
+  return auth;
+}
+
+// ND verifies its own signature check passed (σND). Returns a capability
+// token that the OD must present. The SAS string is the one both sides
+// computed and compared.
+inline NdAuthorization acceptNewDeviceApproval(
+    SessionSecrets& session,
+    const std::string& sas,
+    const NdApproval& approval,
+    std::function<bool(const std::vector<uint8_t>& message,
+                       const std::vector<uint8_t>& signature,
+                       const std::vector<uint8_t>& public_key)> verify_fn) {
+  if (session.used) return NdAuthorization{};
+  if (sas.empty()) return NdAuthorization{};
+
+  const auto digest = newDeviceApprovalDigest(sas, session.pk_nd, session.id);
+  if (!verify_fn || !verify_fn(digest, approval.signature, approval.device_public_key)) {
+    return NdAuthorization{};
+  }
+
+  NdAuthorization auth;
+  auth.session_id = session.id;
+  auth.pk_nd = session.pk_nd;
+  auth.valid_ = true;
+  return auth;
+}
+
+// New authorization-based API (Protocol 4): vault transfer requires a valid
+// capability token from acceptOldDeviceApproval / acceptNewDeviceApproval.
+inline std::vector<uint8_t> encryptVaultForTransfer(
+    const std::vector<VaultEntry>& entries,
+    const std::array<uint8_t, 1184>& pk_target,
+    const NdAuthorization& auth) {
+  if (!auth.valid()) throw std::runtime_error("No valid authorization to transfer vault");
+  if (auth.pk_nd != pk_target) throw std::runtime_error("Authorization bound to different peer key");
+  return internal::encryptVaultForTransferImpl(entries, pk_target, auth.session_id.data(), auth.session_id.size());
+}
+
+// Complete session (Phase H1)
+inline void completeSession(SessionSecrets& secrets) {
+  secrets.wipe();
+  secrets.used = true;
 }
 
 // Merge vault entries: keep entry with later LastModified, ensure salt consistency

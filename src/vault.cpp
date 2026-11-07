@@ -230,6 +230,129 @@ std::vector<VaultEntry> DecryptVault(
   return DeserializeVault(plaintext);
 }
 
+std::vector<uint8_t> EncryptVaultPayload(
+    const std::vector<uint8_t>& key,
+    const std::vector<uint8_t>& plaintext_payload,
+    const std::vector<uint8_t>& aad) {
+  if (key.size() != 32)
+    throw std::runtime_error("Vault encryption key must be 32 bytes");
+
+  std::vector<uint8_t> iv(internal::kAesGcmIvBytes);
+  if (RAND_bytes(iv.data(), static_cast<int>(iv.size())) != 1)
+    throw std::runtime_error("RAND_bytes failed generating vault IV");
+  const std::vector<uint8_t> authenticated_data = aadWithNonce(aad, iv.data(), iv.size());
+
+  internal::EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new());
+  if (!ctx) throw std::runtime_error("EVP_CIPHER_CTX_new failed");
+
+  if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+      EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN,
+                          static_cast<int>(internal::kAesGcmIvBytes), nullptr) != 1 ||
+      EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), iv.data()) != 1) {
+    throw std::runtime_error("EVP_EncryptInit_ex failed");
+  }
+
+  int aad_len = 0;
+  if (!authenticated_data.empty() &&
+      EVP_EncryptUpdate(ctx.get(), nullptr, &aad_len,
+                        authenticated_data.data(),
+                        static_cast<int>(authenticated_data.size())) != 1) {
+    throw std::runtime_error("EVP_EncryptUpdate authenticated data failed");
+  }
+
+  std::vector<uint8_t> ciphertext(plaintext_payload.size());
+  int out_len = 0;
+  if (EVP_EncryptUpdate(ctx.get(), ciphertext.data(), &out_len,
+                        plaintext_payload.data(), static_cast<int>(plaintext_payload.size())) != 1) {
+    throw std::runtime_error("EVP_EncryptUpdate failed");
+  }
+
+  int final_len = 0;
+  if (EVP_EncryptFinal_ex(ctx.get(), ciphertext.data() + out_len, &final_len) != 1) {
+    throw std::runtime_error("EVP_EncryptFinal_ex failed");
+  }
+
+  std::vector<uint8_t> tag(internal::kAesGcmTagBytes);
+  if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG,
+                          static_cast<int>(internal::kAesGcmTagBytes),
+                          tag.data()) != 1) {
+    throw std::runtime_error("EVP_CIPHER_CTX_ctrl GET_TAG failed");
+  }
+
+  // Wire format: iv (12) || tag (16) || ciphertext (N)
+  std::vector<uint8_t> result;
+  result.reserve(internal::kAesGcmIvBytes + internal::kAesGcmTagBytes +
+                 ciphertext.size());
+  result.insert(result.end(), iv.begin(), iv.end());
+  result.insert(result.end(), tag.begin(), tag.end());
+  result.insert(result.end(), ciphertext.begin(), ciphertext.end());
+
+  return result;
+}
+
+std::vector<uint8_t> DecryptVaultPayload(
+    const std::vector<uint8_t>& key,
+    const std::vector<uint8_t>& ciphertext_blob,
+    const std::vector<uint8_t>& aad) {
+  if (key.size() != 32)
+    throw std::runtime_error("Vault decryption key must be 32 bytes");
+
+  constexpr size_t kVaultOverhead =
+      internal::kAesGcmIvBytes + internal::kAesGcmTagBytes;
+  if (ciphertext_blob.size() < kVaultOverhead)
+    throw std::runtime_error("Vault blob too short");
+
+  const uint8_t* iv = ciphertext_blob.data();
+  const uint8_t* tag = ciphertext_blob.data() + internal::kAesGcmIvBytes;
+  const uint8_t* ciphertext = ciphertext_blob.data() + kVaultOverhead;
+  size_t ciphertext_len = ciphertext_blob.size() - kVaultOverhead;
+  if (ciphertext_len > static_cast<size_t>(std::numeric_limits<int>::max()))
+    throw std::runtime_error("Vault ciphertext is too large");
+  const std::vector<uint8_t> authenticated_data =
+      aadWithNonce(aad, iv, internal::kAesGcmIvBytes);
+
+  internal::EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new());
+  if (!ctx) throw std::runtime_error("EVP_CIPHER_CTX_new failed");
+
+  if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+      EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN,
+                          static_cast<int>(internal::kAesGcmIvBytes), nullptr) != 1 ||
+      EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), iv) != 1) {
+    throw std::runtime_error("EVP_DecryptInit_ex failed");
+  }
+
+  int aad_len = 0;
+  if (!authenticated_data.empty() &&
+      EVP_DecryptUpdate(ctx.get(), nullptr, &aad_len,
+                        authenticated_data.data(),
+                        static_cast<int>(authenticated_data.size())) != 1) {
+    throw std::runtime_error("EVP_DecryptUpdate authenticated data failed");
+  }
+
+  std::vector<uint8_t> plaintext(ciphertext_len + 16);
+  int out_len = 0;
+  if (EVP_DecryptUpdate(ctx.get(), plaintext.data(), &out_len,
+                        ciphertext, static_cast<int>(ciphertext_len)) != 1) {
+    throw std::runtime_error("EVP_DecryptUpdate failed");
+  }
+
+  if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG,
+                          static_cast<int>(internal::kAesGcmTagBytes),
+                          const_cast<uint8_t*>(tag)) != 1) {
+    throw std::runtime_error("EVP_CIPHER_CTX_ctrl SET_TAG failed");
+  }
+
+  int final_len = 0;
+  if (EVP_DecryptFinal_ex(ctx.get(), plaintext.data() + out_len, &final_len) != 1) {
+    throw std::runtime_error("Vault decryption failed — wrong master password or tampered data");
+  }
+
+  plaintext.resize(out_len + final_len);
+
+  // Return a copy to avoid issues with any potential cleanup
+  return plaintext;
+}
+
 std::vector<uint8_t> SerializeVault(const std::vector<VaultEntry>& entries) {
   std::vector<uint8_t> result;
 
@@ -317,6 +440,139 @@ std::vector<VaultEntry> DeserializeVault(const std::vector<uint8_t>& data) {
     throw std::runtime_error("Vault data corrupted");
 
   return entries;
+}
+
+// -----------------------------------------------------------------------------
+// VaultPayload serialization (versioned inner payload with trusted-device list)
+// -----------------------------------------------------------------------------
+
+// Inner payload version. 1 = entries + trusted device list.
+// Old payloads have no version byte and start directly with entry count (u32).
+constexpr uint8_t kVaultPayloadVersion = 1;
+
+std::vector<uint8_t> SerializeVaultPayload(const VaultPayload& payload) {
+  std::vector<uint8_t> result;
+
+  auto append_u32 = [&result](uint32_t val) {
+    result.push_back(static_cast<uint8_t>(val >> 24));
+    result.push_back(static_cast<uint8_t>(val >> 16));
+    result.push_back(static_cast<uint8_t>(val >> 8));
+    result.push_back(static_cast<uint8_t>(val));
+  };
+
+  auto append_bytes = [&result, &append_u32](const std::vector<uint8_t>& data) {
+    append_u32(static_cast<uint32_t>(data.size()));
+    result.insert(result.end(), data.begin(), data.end());
+  };
+
+  // Version byte
+  result.push_back(kVaultPayloadVersion);
+
+  // Entries (same format as SerializeVault)
+  append_u32(static_cast<uint32_t>(payload.entries.size()));
+  for (const auto& e : payload.entries) {
+    append_bytes({e.website.begin(), e.website.end()});
+    append_bytes({e.username.begin(), e.username.end()});
+    append_bytes(e.password);
+    append_bytes(e.salt);
+    auto epoch = std::chrono::duration_cast<std::chrono::seconds>(
+        e.lastModified.time_since_epoch()).count();
+    appendU64(result, static_cast<uint64_t>(epoch));
+  }
+
+  // Trusted device keys
+  append_u32(static_cast<uint32_t>(payload.trusted_devices.size()));
+  for (const auto& key : payload.trusted_devices) {
+    append_bytes(key);
+  }
+
+  return result;
+}
+
+VaultPayload DeserializeVaultPayload(const std::vector<uint8_t>& data) {
+  VaultPayload payload;
+  size_t pos = 0;
+
+  auto read_u32 = [&data, &pos]() -> uint32_t {
+    if (pos + 4 > data.size()) throw std::runtime_error("Vault data corrupted");
+    uint32_t val = (static_cast<uint32_t>(data[pos]) << 24) |
+                   (static_cast<uint32_t>(data[pos + 1]) << 16) |
+                   (static_cast<uint32_t>(data[pos + 2]) << 8) |
+                   static_cast<uint32_t>(data[pos + 3]);
+    pos += 4;
+    return val;
+  };
+
+  auto read_bytes = [&data, &pos, &read_u32]() -> std::vector<uint8_t> {
+    uint32_t len = read_u32();
+    if (pos + len > data.size()) throw std::runtime_error("Vault data corrupted");
+    std::vector<uint8_t> result(data.begin() + pos, data.begin() + pos + len);
+    pos += len;
+    return result;
+  };
+
+  if (data.empty()) {
+    throw std::runtime_error("Vault data corrupted");
+  }
+
+  // Detect format: if first byte is our version, parse new format.
+  // Otherwise, parse as legacy format (entries only, no version byte, no trust list).
+  uint8_t first_byte = data[0];
+  if (first_byte == kVaultPayloadVersion) {
+    // New format: version byte present
+    pos = 1;  // skip version byte
+
+    // Entries
+    uint32_t count = read_u32();
+    constexpr size_t kMinimumEntryBytes = 5 * sizeof(uint32_t);
+    if (count > (data.size() - pos) / kMinimumEntryBytes)
+      throw std::runtime_error("Vault data corrupted");
+
+    payload.entries.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+      VaultEntry e;
+      auto website_bytes = read_bytes();
+      auto username_bytes = read_bytes();
+      e.website = std::string(website_bytes.begin(), website_bytes.end());
+      e.username = std::string(username_bytes.begin(), username_bytes.end());
+      e.password = read_bytes();
+      e.salt = read_bytes();
+      auto read_u64 = [&data, &pos]() -> uint64_t {
+        if (pos + 8 > data.size()) throw std::runtime_error("Vault data corrupted");
+        uint64_t val = (static_cast<uint64_t>(data[pos]) << 56) |
+                       (static_cast<uint64_t>(data[pos + 1]) << 48) |
+                       (static_cast<uint64_t>(data[pos + 2]) << 40) |
+                       (static_cast<uint64_t>(data[pos + 3]) << 32) |
+                       (static_cast<uint64_t>(data[pos + 4]) << 24) |
+                       (static_cast<uint64_t>(data[pos + 5]) << 16) |
+                       (static_cast<uint64_t>(data[pos + 6]) << 8) |
+                       static_cast<uint64_t>(data[pos + 7]);
+        pos += 8;
+        return val;
+      };
+      uint64_t epoch = read_u64();
+      e.lastModified = std::chrono::system_clock::from_time_t(epoch);
+      payload.entries.push_back(std::move(e));
+    }
+
+    // Trusted device keys
+    uint32_t trust_count = read_u32();
+    payload.trusted_devices.reserve(trust_count);
+    for (uint32_t i = 0; i < trust_count; ++i) {
+      payload.trusted_devices.push_back(read_bytes());
+    }
+
+    if (pos != data.size())
+      throw std::runtime_error("Vault data corrupted");
+  } else {
+    // Legacy format: no version byte, starts directly with entry count
+    // Reuse the existing DeserializeVault logic
+    pos = 0;
+    payload.entries = DeserializeVault(data);
+    payload.trusted_devices.clear();
+  }
+
+  return payload;
 }
 
 }  // namespace auth

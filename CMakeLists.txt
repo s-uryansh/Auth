@@ -42,6 +42,7 @@ if(ANDROID)
   qt_add_executable(AuthQt MANUAL_FINALIZATION ${AUTH_QT_SOURCES})
   target_link_libraries(AuthQt PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Concurrent Qt6::Network
     AuthLib OQS::oqs ZXing::ZXing)
+target_include_directories(AuthQt PRIVATE /home/s-uryansh/Qt/6.12.0/gcc_64/include)
   target_compile_options(AuthQt PRIVATE ${STRICT_CXX_FLAGS})
   set_target_properties(AuthQt PROPERTIES
     QT_ANDROID_PACKAGE_NAME "org.tmps.auth"
@@ -112,6 +113,78 @@ else()
   target_link_options(QRSyncTests PRIVATE ${SANITIZER_FLAGS})
   add_test(NAME QRSyncTests COMMAND QRSyncTests)
 
+  add_executable(QtUiFlowTests
+    tests/test_qrsync_camera_flow.cpp
+    tests/test_auth_ui.cpp
+    ui/AuthTab.cpp
+    ui/AuthTab.h
+    ui/MainWindow.cpp
+    ui/MainWindow.h
+    ui/QRSyncTab.cpp
+    ui/QRSyncTab.h
+    ui/PasswordManagerTab.cpp
+    ui/PasswordManagerTab.h
+    ui/PasswordVaultWorkflow.cpp
+    ui/PasswordVaultFileStore.cpp
+    ui/SensitiveData.cpp)
+  target_include_directories(QtUiFlowTests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui)
+  target_link_libraries(QtUiFlowTests PRIVATE
+    AuthLib Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Multimedia
+    Qt6::Concurrent Qt6::Network OQS::oqs ZXing::ZXing GTest::gtest_main)
+  target_compile_options(QtUiFlowTests PRIVATE ${STRICT_CXX_FLAGS})
+  add_test(NAME QtUiFlowTests COMMAND QtUiFlowTests)
+  set_tests_properties(QtUiFlowTests PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2")
+
+  add_executable(SyncTpmTests tests/test_sync_tpm.cpp)
+  target_include_directories(SyncTpmTests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(SyncTpmTests PRIVATE
+    OQS::oqs OpenSSL::Crypto GTest::gtest_main)
+  target_compile_options(SyncTpmTests PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
+  target_link_options(SyncTpmTests PRIVATE ${SANITIZER_FLAGS})
+  add_test(NAME SyncTpmTests COMMAND SyncTpmTests)
+
+  add_executable(QRSyncProtocolUnitTests tests/test_qrsync_protocol_unit.cpp)
+  target_include_directories(QRSyncProtocolUnitTests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui)
+  target_link_libraries(QRSyncProtocolUnitTests PRIVATE
+    AuthLib OQS::oqs OpenSSL::Crypto GTest::gtest_main)
+  target_compile_options(QRSyncProtocolUnitTests PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
+  target_link_options(QRSyncProtocolUnitTests PRIVATE ${SANITIZER_FLAGS})
+  add_test(NAME QRSyncProtocolUnitTests COMMAND QRSyncProtocolUnitTests)
+
+  add_executable(SyncTrustStoreTests
+    tests/test_sync_trust_storage.cpp
+    ui/PasswordVaultWorkflow.cpp
+    ui/PasswordVaultFileStore.cpp
+    ui/SensitiveData.cpp)
+  target_include_directories(SyncTrustStoreTests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui)
+  target_link_libraries(SyncTrustStoreTests PRIVATE
+    AuthLib Qt6::Core GTest::gtest_main)
+  target_compile_options(SyncTrustStoreTests PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
+  target_link_options(SyncTrustStoreTests PRIVATE ${SANITIZER_FLAGS})
+  add_test(NAME SyncTrustStoreTests COMMAND SyncTrustStoreTests)
+
+  add_executable(QRSyncIntegrationTests
+    tests/test_qrsync_integration.cpp
+    ui/PasswordVaultWorkflow.cpp
+    ui/PasswordVaultFileStore.cpp
+    ui/SensitiveData.cpp)
+  target_include_directories(QRSyncIntegrationTests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui)
+  target_link_libraries(QRSyncIntegrationTests PRIVATE
+    AuthLib OQS::oqs Qt6::Core GTest::gtest_main)
+  target_compile_options(QRSyncIntegrationTests PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
+  target_link_options(QRSyncIntegrationTests PRIVATE ${SANITIZER_FLAGS})
+  add_test(NAME QRSyncIntegrationTests COMMAND QRSyncIntegrationTests)
+
   add_custom_target(LSanCheck
     COMMAND ${CMAKE_COMMAND} -E env "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp" ${CMAKE_BINARY_DIR}/AuthUI
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -119,8 +192,16 @@ else()
     VERBATIM)
 
   add_executable(AuthQt ${AUTH_QT_SOURCES})
-  target_link_libraries(AuthQt PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Concurrent
+  target_link_libraries(AuthQt PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Concurrent Qt6::Network
     AuthLib OQS::oqs ZXing::ZXing)
+target_include_directories(AuthQt PRIVATE /home/s-uryansh/Qt/6.12.0/gcc_64/include)
+  if(HAVE_TPM2_TSS)
+    find_library(TSS2_ESYS_LIB tss2-esys)
+    find_library(TSS2_TCTILDR_LIB tss2-tctildr)
+    if(TSS2_ESYS_LIB AND TSS2_TCTILDR_LIB)
+      target_link_libraries(AuthQt PRIVATE ${TSS2_ESYS_LIB} ${TSS2_TCTILDR_LIB})
+    endif()
+  endif()
   target_compile_options(AuthQt PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
   target_link_options(AuthQt PRIVATE ${SANITIZER_FLAGS})
 endif()

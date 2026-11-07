@@ -56,6 +56,7 @@ AuthTab::AuthTab(QWidget *parent) : QWidget(parent) {
     auto *form = new QFormLayout;
     username_input_ = new QLineEdit(this);
     password_input_ = new QLineEdit(this);
+    password_input_->setObjectName("authPasswordInput");
     password_input_->setEchoMode(QLineEdit::Password);
     form->addRow("Username:", username_input_);
     form->addRow("Password:", password_input_);

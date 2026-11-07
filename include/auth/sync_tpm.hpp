@@ -4,11 +4,8 @@
 #pragma once
 
 #include <oqs/sig.h>
-#include <openssl/rand.h>
 #include <openssl/crypto.h>
-#include <iostream>
 
-#include <array>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -42,22 +39,31 @@ public:
   SoftwareTpm(SoftwareTpm&&) = delete;
   SoftwareTpm& operator=(SoftwareTpm&&) = delete;
 
-  const char* backendName() const noexcept override { return "software-only mock"; }
+  // This is an in-memory test signer.  It does not provide TPM properties.
+  const char* backendName() const noexcept override { return "software-only test signer"; }
   bool hasTPM() const override { return false; }
 
   void createKey() override {
     wipe();
-    sig_ = OQS_SIG_new(OQS_SIG_alg_ml_dsa_65);
-    if (!sig_) throw std::runtime_error("OQS_SIG_new failed");
+    OqsSigPtr candidate(OQS_SIG_new(OQS_SIG_alg_ml_dsa_65));
+    if (!candidate) throw std::runtime_error("OQS_SIG_new failed");
+
+    std::vector<uint8_t> candidate_pubkey(candidate->length_public_key);
+    std::vector<uint8_t> candidate_secret(candidate->length_secret_key);
     try {
-      pubkey_.resize(sig_->length_public_key);
-      sk_.resize(sig_->length_secret_key);
-      if (OQS_SIG_keypair(sig_, pubkey_.data(), sk_.data()) != OQS_SUCCESS)
+      if (OQS_SIG_keypair(candidate.get(), candidate_pubkey.data(),
+                          candidate_secret.data()) != OQS_SUCCESS) {
         throw std::runtime_error("OQS_SIG_keypair failed");
+      }
     } catch (...) {
-      wipe();
+      cleanse(candidate_pubkey);
+      cleanse(candidate_secret);
       throw;
     }
+
+    sig_ = candidate.release();
+    pubkey_ = std::move(candidate_pubkey);
+    sk_ = std::move(candidate_secret);
   }
 
   std::vector<uint8_t> sign(const std::vector<uint8_t>& message) override {
@@ -66,8 +72,14 @@ public:
     std::vector<uint8_t> signature(sig_len);
     size_t actual_len = sig_len;
     if (OQS_SIG_sign(sig_, signature.data(), &actual_len,
-                     message.data(), message.size(), sk_.data()) != OQS_SUCCESS)
+                     messageData(message), message.size(), sk_.data()) != OQS_SUCCESS) {
+      cleanse(signature);
       throw std::runtime_error("OQS_SIG_sign failed");
+    }
+    if (actual_len == 0 || actual_len > signature.size()) {
+      cleanse(signature);
+      throw std::runtime_error("OQS_SIG_sign returned invalid signature length");
+    }
     signature.resize(actual_len);
     return signature;
   }
@@ -75,9 +87,13 @@ public:
   bool verify(const std::vector<uint8_t>& message,
               const std::vector<uint8_t>& signature,
               const std::vector<uint8_t>& pubkey) override {
-    if (!sig_ || signature.empty() || pubkey.size() != sig_->length_public_key)
+    OqsSigPtr verifier(OQS_SIG_new(OQS_SIG_alg_ml_dsa_65));
+    if (!verifier || signature.empty() ||
+        pubkey.size() != verifier->length_public_key ||
+        signature.size() > verifier->length_signature) {
       return false;
-    return OQS_SIG_verify(sig_, message.data(), message.size(),
+    }
+    return OQS_SIG_verify(verifier.get(), messageData(message), message.size(),
                           signature.data(), signature.size(),
                           pubkey.data()) == OQS_SUCCESS;
   }
@@ -87,7 +103,8 @@ public:
   }
 
   void wipe() override {
-    if (!sk_.empty()) OPENSSL_cleanse(sk_.data(), sk_.size());
+    cleanse(sk_);
+    cleanse(pubkey_);
     if (sig_) OQS_SIG_free(sig_);
     sig_ = nullptr;
     pubkey_.clear();
@@ -95,6 +112,23 @@ public:
   }
 
 private:
+  struct OqsSigDeleter {
+    void operator()(OQS_SIG* signature_scheme) const noexcept {
+      if (signature_scheme) OQS_SIG_free(signature_scheme);
+    }
+  };
+
+  using OqsSigPtr = std::unique_ptr<OQS_SIG, OqsSigDeleter>;
+
+  static const uint8_t* messageData(const std::vector<uint8_t>& message) noexcept {
+    static constexpr uint8_t kEmptyMessage = 0;
+    return message.empty() ? &kEmptyMessage : message.data();
+  }
+
+  static void cleanse(std::vector<uint8_t>& bytes) noexcept {
+    if (!bytes.empty()) OPENSSL_cleanse(bytes.data(), bytes.size());
+  }
+
   OQS_SIG* sig_ = nullptr;
   std::vector<uint8_t> pubkey_;
   std::vector<uint8_t> sk_;
@@ -103,28 +137,13 @@ private:
 class NullTpm : public TpmInterface {
 public:
   const char* backendName() const noexcept override { return "no signing backend"; }
-  bool hasTPM() const override {
-    std::cerr << "[Warning] No TPM present; TPM operations will be no-ops." << std::endl;
-    return false;
-  }
-  void createKey() override {
-    std::cerr << "[Warning] TPM key creation skipped (no TPM)." << std::endl;
-  }
-  std::vector<uint8_t> sign(const std::vector<uint8_t>&) override {
-    std::cerr << "[Warning] TPM signing skipped (no TPM)." << std::endl;
-    return {};
-  }
-  bool verify(const std::vector<uint8_t>&, const std::vector<uint8_t>&, const std::vector<uint8_t>&) override {
-    std::cerr << "[Warning] TPM verification skipped (no TPM)." << std::endl;
-    return false;
-  }
-  std::vector<uint8_t> getPubkey() const override {
-    std::cerr << "[Warning] TPM public key retrieval skipped (no TPM)." << std::endl;
-    return {};
-  }
-  void wipe() override {
-    std::cerr << "[Warning] TPM wipe skipped (no TPM)." << std::endl;
-  }
+  bool hasTPM() const override { return false; }
+  void createKey() override {}
+  std::vector<uint8_t> sign(const std::vector<uint8_t>&) override { return {}; }
+  bool verify(const std::vector<uint8_t>&, const std::vector<uint8_t>&,
+              const std::vector<uint8_t>&) override { return false; }
+  std::vector<uint8_t> getPubkey() const override { return {}; }
+  void wipe() override {}
 };
 
 }  // namespace sync

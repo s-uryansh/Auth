@@ -70,7 +70,8 @@ desktop-build: preflight-desktop
 	@rm -rf "$(BUILD_DIR)"
 	@CXX="$(CXX_BIN)" "$(CMAKE_BIN)" -B "$(BUILD_DIR)" -S . \
 		-DCMAKE_TOOLCHAIN_FILE="$(TOOLCHAIN)" \
-		-DCMAKE_PREFIX_PATH="$(QT_HOST_PREFIX);$(VCPKG_INSTALLED_DIR)"
+		-DCMAKE_PREFIX_PATH="$(QT_HOST_PREFIX);$(VCPKG_INSTALLED_DIR);$(VCPKG_ROOT)/packages/nu-book-zxing-cpp_x64-linux" \
+		-DHAVE_TPM2_TSS=ON
 	@"$(CMAKE_BIN)" --build "$(BUILD_DIR)"
 	@test -f "$(BUILD_DIR)/AuthQt" -a -f "$(BUILD_DIR)/AuthUI"
 
