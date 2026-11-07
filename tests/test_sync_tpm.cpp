@@ -1,5 +1,6 @@
 #include "auth/sync_tpm.hpp"
 #include "auth/ecdsa_wire.hpp"
+#include "auth/tpm2.hpp"
 
 #include <gtest/gtest.h>
 
