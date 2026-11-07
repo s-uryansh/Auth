@@ -31,6 +31,12 @@ public:
                                    QString &error);
     bool importVaultEntriesFromSync(std::vector<auth::VaultEntry> entries,
                                     QString &error);
+    // Protocol 4 Phase H: persist the verified peer device key in the
+    // encrypted trusted-device list, and check membership for later syncs.
+    bool recordTrustedDeviceKey(const std::vector<uint8_t> &device_key,
+                                QString &error);
+    bool isKnownPeerDeviceKey(const std::vector<uint8_t> &device_key,
+                              QString &error) const;
 
 private slots:
     void onSetupClicked();

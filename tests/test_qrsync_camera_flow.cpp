@@ -1,17 +1,20 @@
+#include "qrsync_tab_test_access.h"
+
 #include "QRSyncTab.h"
 
 #include <QApplication>
-#include <QLabel>
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QEventLoop>
+#include <QHostAddress>
 #include <QImage>
+#include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QTemporaryDir>
-#include <QThread>
-#include <QHostAddress>
 #include <QTcpServer>
+#include <QThread>
 #include <ZXing/BarcodeFormat.h>
 #include <ZXing/BitMatrix.h>
 #include <ZXing/ImageView.h>
@@ -23,83 +26,6 @@
 
 #include <algorithm>
 #include <cstring>
-
-class QRSyncTabTestAccess {
-public:
-    static QSize updatePreview(QRSyncTab& tab) {
-        tab.od_mode_ = false;
-        tab.has_camera_ = true;
-        tab.pages_->setCurrentIndex(static_cast<int>(QRSyncTab::Scanning));
-        tab.camera_viewfinder_->resize(320, 240);
-        tab.preview_elapsed_.invalidate();
-        tab.decode_elapsed_.start();
-        QThread::msleep(260);
-        QImage frame_image(640, 480, QImage::Format_RGB32);
-        frame_image.fill(Qt::white);
-        tab.processCameraFrame(QVideoFrame(frame_image));
-        return tab.camera_viewfinder_->pixmap(Qt::ReturnByValue).size();
-    }
-
-    static bool scheduleQrDecode(QRSyncTab& tab, const QImage& frame) {
-        tab.od_mode_ = false;
-        tab.has_camera_ = true;
-        tab.pages_->setCurrentIndex(static_cast<int>(QRSyncTab::Scanning));
-        tab.camera_viewfinder_->resize(320, 240);
-        tab.preview_elapsed_.invalidate();
-        tab.decode_elapsed_.invalidate();
-        tab.processCameraFrame(QVideoFrame(frame));
-        return tab.decode_pending_;
-    }
-
-    static bool decodePending(const QRSyncTab& tab) { return tab.decode_pending_; }
-    static bool showingError(const QRSyncTab& tab) {
-        return tab.pages_->currentIndex() == static_cast<int>(QRSyncTab::Error);
-    }
-    static QPixmap renderQr(QRSyncTab& tab, const std::vector<uint8_t>& payload) {
-        tab.qr_label_->resize(300, 300);
-        tab.renderQRBitmap(payload);
-        return tab.qr_label_->pixmap(Qt::ReturnByValue);
-    }
-    static void scanQr(QRSyncTab& tab, const std::vector<uint8_t>& payload) {
-        tab.od_mode_ = false;
-        tab.handleScannedQr(payload);
-    }
-    static bool reachedSasScreen(const QRSyncTab& tab) {
-        return tab.pages_->currentIndex() == static_cast<int>(QRSyncTab::SAS);
-    }
-
-    static void setupOldSession(QRSyncTab& tab, std::chrono::seconds remaining) {
-        tab.od_mode_ = true;
-        tab.od_expiry_ = std::chrono::system_clock::now() + remaining;
-        tab.session_duration_ms_ =
-            std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
-        tab.session_elapsed_.start();
-        tab.od_id_.fill(0xA5);
-        tab.od_pk_nd_.fill(0xA5);
-        tab.qr_label_->setText("Active QR");
-        tab.server_->close();
-        ASSERT_TRUE(tab.server_->listen(QHostAddress::LocalHost, 0));
-        tab.pages_->setCurrentIndex(static_cast<int>(QRSyncTab::WaitingQR));
-        tab.expiry_timer_->start();
-    }
-
-    static void fireExpiryTimer(QRSyncTab& tab) {
-        ASSERT_TRUE(QMetaObject::invokeMethod(
-            tab.expiry_timer_, "timeout", Qt::DirectConnection));
-    }
-
-    static bool oldDeviceMode(const QRSyncTab& tab) { return tab.od_mode_; }
-    static bool serverListening(const QRSyncTab& tab) {
-        return tab.server_->isListening();
-    }
-    static bool sessionIdCleared(const QRSyncTab& tab) {
-        return std::all_of(tab.od_id_.begin(), tab.od_id_.end(),
-                           [](uint8_t byte) { return byte == 0; });
-    }
-    static QString qrLabelText(const QRSyncTab& tab) {
-        return tab.qr_label_->text();
-    }
-};
 
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -249,7 +175,7 @@ TEST(QRSyncSessionTimerTest, DisplaysFiveMinuteCountdownAndExpiresTheSession) {
     QRSyncTabTestAccess::setupOldSession(tab, std::chrono::seconds(-1));
     QRSyncTabTestAccess::fireExpiryTimer(tab);
 
-    EXPECT_FALSE(QRSyncTabTestAccess::oldDeviceMode(tab));
+    EXPECT_FALSE(QRSyncTabTestAccess::isOldDeviceMode(tab));
     EXPECT_FALSE(QRSyncTabTestAccess::serverListening(tab));
     EXPECT_TRUE(QRSyncTabTestAccess::sessionIdCleared(tab));
     EXPECT_EQ(QRSyncTabTestAccess::qrLabelText(tab), QString());

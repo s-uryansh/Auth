@@ -604,7 +604,9 @@ inline NdAuthorization acceptOldDeviceApproval(
 
 // ND verifies its own signature check passed (σND). Returns a capability
 // token that the OD must present. The SAS string is the one both sides
-// computed and compared.
+// computed and compared. Protocol 4 requires the OD to use this token at
+// most once: a verified session is consumed so a replayed or duplicated
+// Kem frame can never trigger a second vault release.
 inline NdAuthorization acceptNewDeviceApproval(
     SessionSecrets& session,
     const std::string& sas,
@@ -620,6 +622,7 @@ inline NdAuthorization acceptNewDeviceApproval(
     return NdAuthorization{};
   }
 
+  session.used = true;
   NdAuthorization auth;
   auth.session_id = session.id;
   auth.pk_nd = session.pk_nd;

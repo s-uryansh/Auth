@@ -7,3 +7,6 @@ leak:libgtk-3
 leak:libqgtk3
 leak:libharfbuzz
 leak:libcairo
+# tss2-tctildr leaks its loader context when a device TCTI fails to open
+# (upstream library bug on the permission-denied path, not app code).
+leak:libtss2

@@ -45,17 +45,21 @@ class QRSyncTabTestAccess;
 //   2. ND (New Device, empty vault) scans QR, connects to OD via TCP.
 //   3. Both compute SAS = H(PK_n ∥ ID) [full 32-byte SHA-256] and display for
 //      out-of-band visual comparison (SAS never sent over network).
-//   4. OD user approves → OD signs σOD = Sign(skOD, H(ID′∥T′∥PKn′)) via TPM
-//      → sends ID′, T′, PKn′, pkOD, σOD.
-//   5. ND verifies σOD via TPM.
-//   6. ND signs σND = Sign(skND, H(SAS ∥ PKn ∥ ID)) via TPM → sends pkND, σND.
-//   7. OD verifies σND via TPM.
+//   4. OD user approves → OD signs σOD = Sign(skOD, H(ID′∥T′∥PKn′)) → sends
+//      ID′, T′, PKn′, pkOD, σOD.
+//   5. ND verifies σOD.
+//   6. ND signs σND = Sign(skND, H(SAS ∥ PKn ∥ ID)) → sends pkND, σND.
+//   7. OD verifies σND.
 //   8. OD encapsulates: (Ks, Kem) ← ML-KEM-768.Encaps(PKn), encrypts vault
 //      with AES-256-GCM under Ks, sends Kem and E_Vtr.
 //   9. ND decapsulates Ks ← ML-KEM-768.Decaps(SKn, Kem), decrypts vault,
 //      merges entries.
 //
 // QR direction: OD (vault holder) shows QR, ND (empty vault) scans it.
+//
+// Device signing: the working app uses a software ECDSA P-256 signer.
+// TPM/secure-element code exists in the project but is not instantiated or
+// called at runtime; no PIN prompt or hardware access occurs.
 class QRSyncTab : public QWidget {
     Q_OBJECT
 
@@ -107,7 +111,9 @@ private:
     QString formatSAS(const std::string &sas);
     void renderQRBitmap(const std::vector<uint8_t> &data);
     std::vector<auth::VaultEntry> loadLocalVault();
-    void saveLocalVault(const std::vector<auth::VaultEntry> &entries);
+    bool saveLocalVault(const std::vector<auth::VaultEntry> &entries);
+    bool ensureDeviceSigner(QString &error);
+    void completeNewDeviceAcceptance();
     QByteArray sessionId() const;
     void createClientSocket();
     void sendPlainFrame(quint8 type, const QByteArray &payload);
@@ -142,6 +148,13 @@ private:
     // Shared state
     std::vector<uint8_t> noise_key_;
     std::unique_ptr<auth::sync::TpmInterface> tpm_;
+    // device_key_ready_ means the software signing key has been created.
+    bool device_key_ready_ = false;
+    QString device_signer_error_;
+    // Peer device signing keys (pkdev) captured from verified approvals and
+    // recorded in the local trusted-device list T after a successful sync.
+    std::vector<uint8_t> peer_pk_od_;
+    std::vector<uint8_t> peer_pk_nd_;
     PasswordManagerTab *password_manager_ = nullptr;
 
     // UI widgets

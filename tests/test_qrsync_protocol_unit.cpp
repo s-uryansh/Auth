@@ -99,6 +99,24 @@ TEST(NewDeviceApproval, VerifiesASignatureOverSasPkAndSessionId) {
   EXPECT_EQ(authorization.ndPublicKey(), session.secrets.pk_nd);
 }
 
+TEST(NewDeviceApproval, AVerifiedSessionIsConsumedAndCannotApproveTwice) {
+  const auto now = Clock::time_point(std::chrono::seconds(2'000'000));
+  auto session =
+      auth::sync::beginNewDeviceSession("127.0.0.1:1", now, kLifetime);
+  auth::sync::SoftwareTpm nd_signer;
+  nd_signer.createKey();
+  const auto sas = auth::sync::computeSAS(session.secrets.pk_nd, session.secrets.id);
+  const auto approval = makeNdApproval(sas, session.secrets, nd_signer);
+
+  const auto first = auth::sync::acceptNewDeviceApproval(
+      session.secrets, sas, approval, verifyWith(nd_signer));
+  EXPECT_TRUE(first.valid());
+  EXPECT_TRUE(session.secrets.used);
+  const auto second = auth::sync::acceptNewDeviceApproval(
+      session.secrets, sas, approval, verifyWith(nd_signer));
+  EXPECT_FALSE(second.valid());
+}
+
 TEST(NewDeviceApproval, ASignatureFromAWrongKeyIsRejected) {
   const auto now = Clock::time_point(std::chrono::seconds(2'000'000));
   auto session =

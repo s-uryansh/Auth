@@ -1,10 +1,12 @@
 #include "QRSyncTab.h"
 
+#include "DeviceSigner.h"
 #include "PasswordManagerTab.h"
 #include "SensitiveData.h"
 
 #include "auth/sync_protocol.hpp"
 #include "auth/sync_tpm.hpp"
+#include "auth/sync_wire.hpp"
 #include "auth/tpm2.hpp"
 
 #include <QAbstractSocket>
@@ -21,6 +23,7 @@
 #include <QMediaCaptureSession>
 #include <QMediaDevices>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QNetworkInterface>
 #include <QPixmap>
 #include <QPermissions>
@@ -72,9 +75,12 @@ using auth::sync::acceptNewDeviceApproval;
 using auth::sync::scanPairingQR;
 using auth::sync::serializeQR;
 using auth::sync::SessionSecrets;
-using auth::sync::SoftwareTpm;
-using auth::sync::Tpm2Tpm;
-using auth::sync::TpmInterface;
+using auth::sync::aesGcmEncryptPayload;
+using auth::sync::aesGcmDecryptPayload;
+using auth::sync::deserializeNdApproval;
+using auth::sync::deserializeOdApproval;
+using auth::sync::serializeNdApproval;
+using auth::sync::serializeOdApproval;
 
 namespace {
 
@@ -144,160 +150,6 @@ QString reachableLanAddress() {
     return QStringLiteral("127.0.0.1");
 }
 
-std::vector<uint8_t> aesGcmEncrypt(const std::vector<uint8_t>& key,
-                                   const std::vector<uint8_t>& plaintext) {
-    if (key.size() != 32) throw std::runtime_error("AES-GCM key must be 32 bytes");
-    std::array<uint8_t, 12> iv{};
-    if (RAND_bytes(iv.data(), 12) != 1) {
-        throw std::runtime_error("RAND_bytes failed for GCM IV");
-    }
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) throw std::runtime_error("EVP_CIPHER_CTX_new failed");
-    bool ok = EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
-              EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) == 1 &&
-              EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.data(), iv.data()) == 1;
-    int outlen = 0;
-    std::vector<uint8_t> ciphertext(plaintext.empty() ? 0 : plaintext.size() + 16);
-    if (ok && !plaintext.empty()) {
-        ok = EVP_EncryptUpdate(ctx, ciphertext.data(), &outlen,
-                               plaintext.data(),
-                               static_cast<int>(plaintext.size())) == 1;
-    }
-    int finallen = 0;
-    if (ok) {
-        ok = EVP_EncryptFinal_ex(ctx, ciphertext.data() + outlen, &finallen) == 1;
-    }
-    std::vector<uint8_t> tag(16);
-    if (ok) {
-        ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag.data()) == 1;
-    }
-    EVP_CIPHER_CTX_free(ctx);
-    if (!ok) throw std::runtime_error("AES-GCM encrypt failed");
-    ciphertext.resize(outlen + finallen);
-    std::vector<uint8_t> result;
-    result.reserve(12 + 16 + ciphertext.size());
-    result.insert(result.end(), iv.begin(), iv.end());
-    result.insert(result.end(), tag.begin(), tag.end());
-    result.insert(result.end(), ciphertext.begin(), ciphertext.end());
-    return result;
-}
-
-std::vector<uint8_t> aesGcmDecrypt(const std::vector<uint8_t>& key,
-                                   const std::vector<uint8_t>& data) {
-    if (key.size() != 32) throw std::runtime_error("AES-GCM key must be 32 bytes");
-    if (data.size() < 12 + 16) {
-        throw std::runtime_error("AES-GCM payload too short");
-    }
-    const uint8_t* iv = data.data();
-    const uint8_t* tag_ptr = data.data() + 12;
-    const uint8_t* ct_ptr = data.data() + 12 + 16;
-    size_t ct_len = data.size() - 12 - 16;
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) throw std::runtime_error("EVP_CIPHER_CTX_new failed");
-    bool ok = EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
-              EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) == 1 &&
-              EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.data(), iv) == 1;
-    int outlen = 0;
-    std::vector<uint8_t> plaintext(ct_len + 16);
-    if (ok && ct_len > 0) {
-        ok = EVP_DecryptUpdate(ctx, plaintext.data(), &outlen,
-                               ct_ptr, static_cast<int>(ct_len)) == 1;
-    }
-    if (ok) {
-        ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16,
-                                 const_cast<uint8_t*>(tag_ptr)) == 1;
-    }
-    int finallen = 0;
-    if (ok) {
-        ok = EVP_DecryptFinal_ex(ctx, plaintext.data() + outlen, &finallen) == 1;
-    }
-    EVP_CIPHER_CTX_free(ctx);
-    if (!ok) throw std::runtime_error("AES-GCM decrypt failed / tag verification failed");
-    plaintext.resize(outlen + finallen);
-    return plaintext;
-}
-
-// OdApproval wire serialization (for kOdApproval frame: OD -> ND)
-std::vector<uint8_t> serializeOdApproval(const auth::sync::OdApproval& a) {
-    std::vector<uint8_t> out;
-    out.reserve(16 + 8 + 1184 + 2 + a.device_public_key.size() +
-                2 + a.signature.size());
-    out.insert(out.end(), a.id.begin(), a.id.end());
-    uint64_t epoch = std::chrono::duration_cast<std::chrono::seconds>(
-        a.expiry.time_since_epoch()).count();
-    for (int i = 7; i >= 0; --i)
-        out.push_back(static_cast<uint8_t>((epoch >> (static_cast<uint64_t>(i) * 8)) & 0xff));
-    out.insert(out.end(), a.pk_nd.begin(), a.pk_nd.end());
-    uint16_t pk_len = static_cast<uint16_t>(a.device_public_key.size());
-    out.push_back(static_cast<uint8_t>(pk_len >> 8));
-    out.push_back(static_cast<uint8_t>(pk_len & 0xff));
-    out.insert(out.end(), a.device_public_key.begin(), a.device_public_key.end());
-    uint16_t sig_len = static_cast<uint16_t>(a.signature.size());
-    out.push_back(static_cast<uint8_t>(sig_len >> 8));
-    out.push_back(static_cast<uint8_t>(sig_len & 0xff));
-    out.insert(out.end(), a.signature.begin(), a.signature.end());
-    return out;
-}
-
-auth::sync::OdApproval deserializeOdApproval(const std::vector<uint8_t>& data) {
-    auth::sync::OdApproval a;
-    size_t pos = 0;
-    if (data.size() < 16 + 8 + 1184 + 2 + 2)
-        throw std::runtime_error("OdApproval too short");
-    std::copy(data.begin(), data.begin() + 16, a.id.begin());
-    pos = 16;
-    uint64_t epoch = 0;
-    for (int i = 0; i < 8; ++i)
-        epoch = (epoch << 8) | static_cast<uint64_t>(data[pos++]);
-    a.expiry = std::chrono::system_clock::time_point(
-        std::chrono::seconds(static_cast<int64_t>(epoch)));
-    std::copy(data.begin() + pos, data.begin() + pos + 1184, a.pk_nd.begin());
-    pos += 1184;
-    if (data.size() < pos + 2) throw std::runtime_error("OdApproval truncated (pk len)");
-    uint16_t pk_len = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
-    pos += 2;
-    if (data.size() < pos + pk_len) throw std::runtime_error("OdApproval truncated (pk)");
-    a.device_public_key.assign(data.begin() + pos, data.begin() + pos + pk_len);
-    pos += pk_len;
-    if (data.size() < pos + 2) throw std::runtime_error("OdApproval truncated (sig len)");
-    uint16_t sig_len = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
-    pos += 2;
-    if (data.size() < pos + sig_len) throw std::runtime_error("OdApproval truncated (sig)");
-    a.signature.assign(data.begin() + pos, data.begin() + pos + sig_len);
-    return a;
-}
-
-// NdApproval wire serialization (for kNdApproval frame: ND -> OD)
-std::vector<uint8_t> serializeNdApproval(const auth::sync::NdApproval& a) {
-    std::vector<uint8_t> out;
-    out.reserve(2 + a.device_public_key.size() + 2 + a.signature.size());
-    uint16_t pk_len = static_cast<uint16_t>(a.device_public_key.size());
-    out.push_back(static_cast<uint8_t>(pk_len >> 8));
-    out.push_back(static_cast<uint8_t>(pk_len & 0xff));
-    out.insert(out.end(), a.device_public_key.begin(), a.device_public_key.end());
-    uint16_t sig_len = static_cast<uint16_t>(a.signature.size());
-    out.push_back(static_cast<uint8_t>(sig_len >> 8));
-    out.push_back(static_cast<uint8_t>(sig_len & 0xff));
-    out.insert(out.end(), a.signature.begin(), a.signature.end());
-    return out;
-}
-
-auth::sync::NdApproval deserializeNdApproval(const std::vector<uint8_t>& data) {
-    auth::sync::NdApproval a;
-    size_t pos = 0;
-    if (data.size() < 4) throw std::runtime_error("NdApproval too short");
-    uint16_t pk_len = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
-    pos += 2;
-    if (data.size() < pos + pk_len) throw std::runtime_error("NdApproval truncated (pk)");
-    a.device_public_key.assign(data.begin() + pos, data.begin() + pos + pk_len);
-    pos += pk_len;
-    if (data.size() < pos + 2) throw std::runtime_error("NdApproval truncated (sig len)");
-    uint16_t sig_len = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
-    pos += 2;
-    if (data.size() < pos + sig_len) throw std::runtime_error("NdApproval truncated (sig)");
-    a.signature.assign(data.begin() + pos, data.begin() + pos + sig_len);
-    return a;
-}
 
 } // namespace
 
@@ -475,6 +327,9 @@ QRSyncTab::QRSyncTab(PasswordManagerTab* password_manager, QWidget* parent)
     approving_nd_label_->setAlignment(Qt::AlignCenter);
     an_layout->addWidget(approving_nd_label_);
     nd_approve_btn_->setMinimumHeight(44);
+    // Protocol 4 has no approval gesture on the new device; the page keeps
+    // only Cancel. The button stays hidden and unwired.
+    nd_approve_btn_->hide();
     nd_approve_cancel_btn_->setMinimumHeight(44);
     an_layout->addWidget(nd_approve_btn_);
     an_layout->addWidget(nd_approve_cancel_btn_);
@@ -532,7 +387,6 @@ QRSyncTab::QRSyncTab(PasswordManagerTab* password_manager, QWidget* parent)
     connect(sas_cancel_btn_, &QPushButton::clicked, this, &QRSyncTab::onCancelClicked);
     connect(od_approve_btn_, &QPushButton::clicked, this, &QRSyncTab::onApproveClicked);
     connect(od_approve_cancel_btn_, &QPushButton::clicked, this, &QRSyncTab::onCancelClicked);
-    connect(nd_approve_btn_, &QPushButton::clicked, this, &QRSyncTab::onApproveClicked);
     connect(nd_approve_cancel_btn_, &QPushButton::clicked, this, &QRSyncTab::onCancelClicked);
     connect(transfer_cancel_btn_, &QPushButton::clicked, this, &QRSyncTab::onCancelClicked);
     connect(done_btn_, &QPushButton::clicked, this, &QRSyncTab::onDoneClicked);
@@ -607,12 +461,18 @@ QRSyncTab::QRSyncTab(PasswordManagerTab* password_manager, QWidget* parent)
         handleScannedQr(bytes);
     });
 
-    // ---------- TPM ----------
-    try {
-        tpm_ = std::make_unique<SoftwareTpm>();
-    } catch (const std::exception& e) {
-        tpm_ = std::make_unique<auth::sync::NullTpm>();
-        updateStatus(QString("TPM backend unavailable: %1").arg(e.what()));
+    // ---------- Device signing key (Protocol 4 Phase A) ----------
+    // The working app uses only a software ECDSA P-256 signer. No TPM key
+    // is created, no PIN is prompted, and no hardware is accessed at
+    // runtime. TPM 2.0 and Android Keystore code remains in the project
+    // but is never instantiated or called.
+    {
+        QString signer_error;
+        tpm_ = ui::makeDeviceSigner(signer_error);
+        if (!signer_error.isEmpty()) {
+            device_signer_error_ = signer_error;
+            updateStatus(signer_error);
+        }
     }
 
     switchScreen(Role);
@@ -620,6 +480,7 @@ QRSyncTab::QRSyncTab(PasswordManagerTab* password_manager, QWidget* parent)
 
 QRSyncTab::~QRSyncTab() {
     wipeSession();
+    if (tpm_) tpm_->wipe();
     if (camera_) camera_->stop();
     if (server_) server_->close();
     if (socket_) socket_->disconnectFromHost();
@@ -724,9 +585,12 @@ void QRSyncTab::updateSessionCountdown() {
 bool QRSyncTab::isSessionExpired() const {
     const auto deadline = od_mode_ ? od_expiry_ : expiry_;
     if (deadline == std::chrono::system_clock::time_point{}) return false;
+    // Wall clock is the protocol's expiry (T in Protocol 4). The monotonic
+    // clock adds a defence against post-hoc wall-clock changes but is only
+    // consulted when a session timer was actually started.
     return std::chrono::system_clock::now() >= deadline ||
-           !session_elapsed_.isValid() ||
-           session_elapsed_.elapsed() >= session_duration_ms_;
+           (session_elapsed_.isValid() &&
+            session_elapsed_.elapsed() >= session_duration_ms_);
 }
 
 void QRSyncTab::expireSession() {
@@ -763,12 +627,16 @@ void QRSyncTab::wipeSession() {
     od_auth_ = auth::sync::NdAuthorization{};
     od_pk_od_.clear();
     od_sigma_od_.clear();
+    peer_pk_od_.clear();
+    peer_pk_nd_.clear();
 
     if (!noise_key_.empty()) {
         OPENSSL_cleanse(noise_key_.data(), noise_key_.size());
         noise_key_.clear();
     }
-    if (tpm_) tpm_->wipe();
+    // The device signing key (skdev) is a per-device identity, not session
+    // material: Protocol 4 Phase A keeps it resident; only the destructor
+    // releases the handle.
 
     socket_rx_.clear();
     vault_data_.clear();
@@ -824,8 +692,9 @@ void QRSyncTab::renderQRBitmap(const std::vector<uint8_t>& qr_data) {
 
 std::vector<auth::VaultEntry> QRSyncTab::loadLocalVault() {
     QString error;
-    if (!password_manager_->exportVaultEntriesForSync(transfer_entries_, error)) {
-        showError(error);
+    if (!password_manager_ ||
+        !password_manager_->exportVaultEntriesForSync(transfer_entries_, error)) {
+        showError(error.isEmpty() ? "This device's vault is unavailable" : error);
         return {};
     }
     if (transfer_entries_.empty()) {
@@ -837,14 +706,73 @@ std::vector<auth::VaultEntry> QRSyncTab::loadLocalVault() {
     return transfer_entries_;
 }
 
-void QRSyncTab::saveLocalVault(const std::vector<auth::VaultEntry>& entries) {
+bool QRSyncTab::saveLocalVault(const std::vector<auth::VaultEntry>& entries) {
     QString error;
-    if (!password_manager_->importVaultEntriesFromSync(entries, error)) {
-        showError(error);
-        return;
+    if (!password_manager_ ||
+        !password_manager_->importVaultEntriesFromSync(entries, error)) {
+        showError(error.isEmpty()
+                      ? "The received vault could not be saved on this device"
+                      : error);
+        return false;
     }
     updateStatus(QString("Vault sync complete: %1 credential(s)")
                      .arg(entries.size()));
+    return true;
+}
+
+// Protocol 4 Phase A: establish the device signing key.
+// The working app uses only a software ECDSA P-256 signer. No TPM key is
+// created, no PIN is prompted, and no hardware is accessed at runtime.
+// Pairing is never blocked by missing TPM hardware.
+bool QRSyncTab::ensureDeviceSigner(QString& error) {
+    if (device_key_ready_) return true;
+    error.clear();
+    try {
+        tpm_->createKey();
+    } catch (const std::exception& e) {
+        error = QString("Could not create signing key: %1").arg(e.what());
+        return false;
+    }
+    device_key_ready_ = true;
+    return true;
+}
+
+// Protocol 4, after ND verifies sigma_OD: ND's TPM signs sigma_ND over
+// (SAS || PKn' || ID'), and ND encapsulates to the old device's QR public
+// key. No additional user click is part of the protocol on the ND side.
+void QRSyncTab::completeNewDeviceAcceptance() {
+    QString signer_error;
+    if (!ensureDeviceSigner(signer_error)) {
+        showError(signer_error);
+        wipeSession();
+        return;
+    }
+    try {
+        const std::vector<uint8_t> digest =
+            newDeviceApprovalDigest(sas_code_, pk_nd_, id_);
+        auth::sync::NdApproval nd_approval;
+        nd_approval.device_public_key = tpm_->getPubkey();
+        nd_approval.signature = tpm_->sign(digest);
+        const auto nd_wire = serializeNdApproval(nd_approval);
+        sendPlainFrame(2,
+            QByteArray(reinterpret_cast<const char*>(nd_wire.data()),
+                       static_cast<int>(nd_wire.size())));
+
+        auto kem_result = kemEncapsulate(pk_nd_, nd_auth_);
+        std::vector<uint8_t> kem_ct = std::move(kem_result.first);
+        noise_key_ = std::vector<uint8_t>(kem_result.second.begin(),
+                                          kem_result.second.end());
+        sendPlainFrame(3,
+            QByteArray(reinterpret_cast<const char*>(kem_ct.data()),
+                       static_cast<int>(kem_ct.size())));
+        OPENSSL_cleanse(kem_ct.data(), kem_ct.size());
+
+        switchScreen(Transferring);
+        updateStatus("Waiting for the vault…");
+    } catch (const std::exception& e) {
+        showError(QString("New-device approval failed: %1").arg(e.what()));
+        wipeSession();
+    }
 }
 
 QByteArray QRSyncTab::sessionId() const {
@@ -902,6 +830,14 @@ void QRSyncTab::onStartClicked() {
         try {
             loadLocalVault();
             if (transfer_entries_.empty()) return;
+
+            // Protocol 4 Phase A precedes B: the one-time session only
+            // starts once the hardware device key is resident and unlocked.
+            QString signer_error;
+            if (!ensureDeviceSigner(signer_error)) {
+                showError(signer_error);
+                return;
+            }
 
             OQS_KEM* kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
             if (!kem) throw std::runtime_error("OQS_KEM_new failed");
@@ -1276,17 +1212,27 @@ void QRSyncTab::handleSocketFrame(quint8 type, const QByteArray& peer_session_id
                 nd_auth_ = acceptOldDeviceApproval(session_, od_approval, now, verify_fn);
                 if (!nd_auth_.valid()) {
                     showError("OD approval signature verification failed");
+                    wipeSession();
                     return;
                 }
                 new_device_approved_ = true;
-                updateStatus("Old device approved");
+                peer_pk_od_ = od_approval.device_public_key;
+                QString trust_error;
+                const bool known_device = password_manager_ &&
+                    password_manager_->isKnownPeerDeviceKey(peer_pk_od_, trust_error) &&
+                    trust_error.isEmpty();
+                updateStatus(known_device
+                    ? "Known device recognised — the SAS check still applies"
+                    : "Old device approved — first pairing, trust rests on the SAS check");
                 approving_nd_label_->setText(
-                    "The old device has approved.\n"
-                    "Tap Approve to continue.");
-                nd_approve_btn_->setEnabled(true);
-                nd_approve_btn_->show();
+                    "The old device approved this session.\n"
+                    "Confirming with the device key and waiting for the vault…");
+                // Protocol 4: ND signs sigma_ND and encapsulates once its
+                // verification passes — no further user step exists here.
+                completeNewDeviceAcceptance();
             } catch (const std::exception& e) {
                 showError(QString("OD approval handling failed: %1").arg(e.what()));
+                wipeSession();
             }
             break;
         }
@@ -1304,24 +1250,35 @@ void QRSyncTab::handleSocketFrame(quint8 type, const QByteArray& peer_session_id
                                                    nd_approval, verify_fn);
                 if (!od_auth_.valid()) {
                     showError("ND approval signature verification failed");
+                    wipeSession();
                     return;
                 }
-                old_device_approved_ = true;
+                peer_pk_nd_ = nd_approval.device_public_key;
                 updateStatus("New device verified");
             } catch (const std::exception& e) {
                 showError(QString("ND approval handling failed: %1").arg(e.what()));
+                wipeSession();
             }
             break;
         }
 
-        case 3: {  // kKemCiphertext - OD sends, ND receives
+        case 3: {  // kKemCiphertext - ND sends, OD receives
             if (!od_mode_) {
-                showError("Received KEM ciphertext but this is the New Device");
+                showError("Received KEM ciphertext but this is the Old Device");
+                return;
+            }
+            // Protocol 4: no vault data may move before the old device has
+            // verified the new device's signature over this session.
+            if (!od_auth_.valid()) {
+                showError("Cannot release the vault: the new device's "
+                          "signature has not been verified.");
+                wipeSession();
                 return;
             }
             try {
                 if (body.size() != 1088) {
                     showError(QString("Invalid KEM ciphertext length: %1").arg(body.size()));
+                    wipeSession();
                     return;
                 }
                 std::vector<uint8_t> kem_ct(body.begin(), body.end());
@@ -1329,32 +1286,36 @@ void QRSyncTab::handleSocketFrame(quint8 type, const QByteArray& peer_session_id
                     kemDecapsulate(sk_nd_, kem_ct);
                 noise_key_ = std::vector<uint8_t>(shared_secret.begin(),
                                                   shared_secret.end());
+                OPENSSL_cleanse(shared_secret.data(), shared_secret.size());
 
                 std::vector<uint8_t> serialized =
                     auth::SerializeVault(transfer_entries_);
                 std::vector<uint8_t> encrypted =
-                    aesGcmEncrypt(noise_key_, serialized);
+                    aesGcmEncryptPayload(noise_key_, serialized);
 
                 sendPlainFrame(5,
                     QByteArray(reinterpret_cast<const char*>(encrypted.data()),
                                static_cast<int>(encrypted.size())));
+                // Single-use session: the vault is released exactly once.
+                od_auth_.invalidate();
                 switchScreen(Transferring);
                 updateStatus("Sending vault…");
             } catch (const std::exception& e) {
                 showError(QString("KEM decapsulation failed: %1").arg(e.what()));
+                wipeSession();
             }
             break;
         }
 
-        case 5: {  // kTransfer - OD sends, ND receives
+        case 5: {  // kTransfer (E_tr) - OD sends, ND receives
             if (od_mode_) {
-                showError("Received vault transfer but this is the Old Device");
+                showError("Received vault transfer but this is the New Device");
                 return;
             }
             try {
                 std::vector<uint8_t> transfer_bytes(body.begin(), body.end());
                 std::vector<uint8_t> plaintext =
-                    aesGcmDecrypt(noise_key_, transfer_bytes);
+                    aesGcmDecryptPayload(noise_key_, transfer_bytes);
                 auto remote_entries = auth::DeserializeVault(plaintext);
 
                 std::vector<auth::VaultEntry> local_entries;
@@ -1364,22 +1325,32 @@ void QRSyncTab::handleSocketFrame(quint8 type, const QByteArray& peer_session_id
                 }
 
                 auto merged = mergeVaultEntries(local_entries, remote_entries);
-
-                std::vector<auth::sync::DevicePk> trust_list;
-                if (!od_pk_od_.empty()) {
-                    auth::sync::addTrustedDevice(trust_list, od_pk_od_);
+                const bool saved = saveLocalVault(merged);
+                ui::wipeVaultEntries(merged);
+                ui::wipeVaultEntries(local_entries);
+                ui::wipeVaultEntries(remote_entries);
+                if (!saved) {
+                    // Nothing was imported: never acknowledge a success we
+                    // did not achieve.
+                    wipeSession();
+                    return;
                 }
 
-                saveLocalVault(merged);
+                QString trust_error;
+                if (!peer_pk_od_.empty() && password_manager_ &&
+                    !password_manager_->recordTrustedDeviceKey(peer_pk_od_, trust_error)) {
+                    updateStatus(QString("Vault imported, but the device was not remembered: %1")
+                                     .arg(trust_error));
+                }
 
                 sendPlainFrame(6, QByteArray());
-
                 wipeSession();
                 switchScreen(Done);
                 updateStatus("Vault merged and saved");
                 emit syncFinished(true, "Vault sync complete");
             } catch (const std::exception& e) {
                 showError(QString("Vault transfer failed: %1").arg(e.what()));
+                wipeSession();
             }
             break;
         }
@@ -1390,6 +1361,12 @@ void QRSyncTab::handleSocketFrame(quint8 type, const QByteArray& peer_session_id
                 return;
             }
             updateStatus("Vault transfer acknowledged");
+            QString trust_error;
+            if (!peer_pk_nd_.empty() && password_manager_ &&
+                !password_manager_->recordTrustedDeviceKey(peer_pk_nd_, trust_error)) {
+                updateStatus(QString("Transfer acknowledged, but the device was not remembered: %1")
+                                 .arg(trust_error));
+            }
             wipeSession();
             switchScreen(Done);
             emit syncFinished(true, "Vault synced successfully");
@@ -1398,11 +1375,13 @@ void QRSyncTab::handleSocketFrame(quint8 type, const QByteArray& peer_session_id
 
         case 255: {  // kAbort
             showError("Peer aborted the sync session");
+            wipeSession();
             break;
         }
 
         default: {
             showError(QString("Unknown frame type: %1").arg(static_cast<int>(type)));
+            wipeSession();
             break;
         }
     }
@@ -1426,9 +1405,11 @@ void QRSyncTab::onCodesMatchClicked() {
         od_approve_btn_->show();
     } else {
         od_sas_label_->setText(formatSAS(sas_code_));
+        // Protocol 4 has no approval step on the new device: it waits for
+        // the old device's signed approval, then confirms automatically.
         switchScreen(ApprovingND);
-        nd_approve_btn_->setEnabled(false);
-        nd_approve_btn_->hide();
+        approving_nd_label_->setText(
+            "Waiting for the old device to approve and sign…");
     }
 }
 
@@ -1442,82 +1423,40 @@ void QRSyncTab::onApproveClicked() {
         expireSession();
         return;
     }
-    if (od_mode_) {
-        try {
-            if (!tpm_) {
-                showError("TPM backend unavailable");
-                return;
-            }
-            tpm_->createKey();
-            od_pk_od_ = tpm_->getPubkey();
+    if (!od_mode_) return;  // Protocol 4: only the old device approves.
+    QString signer_error;
+    if (!ensureDeviceSigner(signer_error)) {
+        showError(signer_error);
+        return;
+    }
+    try {
+        od_pk_od_ = tpm_->getPubkey();
 
-            std::vector<uint8_t> od_digest =
-                oldDeviceApprovalDigest(od_id_, od_expiry_, od_pk_nd_);
-            od_sigma_od_ = tpm_->sign(od_digest);
+        std::vector<uint8_t> od_digest =
+            oldDeviceApprovalDigest(od_id_, od_expiry_, od_pk_nd_);
+        od_sigma_od_ = tpm_->sign(od_digest);
 
-            auth::sync::OdApproval od_approval;
-            od_approval.id = od_id_;
-            od_approval.expiry = od_expiry_;
-            od_approval.pk_nd = od_pk_nd_;
-            od_approval.device_public_key = std::move(od_pk_od_);
-            od_approval.signature = std::move(od_sigma_od_);
+        auth::sync::OdApproval od_approval;
+        od_approval.id = od_id_;
+        od_approval.expiry = od_expiry_;
+        od_approval.pk_nd = od_pk_nd_;
+        od_approval.device_public_key = od_pk_od_;
+        od_approval.signature = od_sigma_od_;
 
-            auto od_wire = serializeOdApproval(od_approval);
-            sendPlainFrame(1,
-                QByteArray(reinterpret_cast<const char*>(od_wire.data()),
-                           static_cast<int>(od_wire.size())));
+        auto od_wire = serializeOdApproval(od_approval);
+        sendPlainFrame(1,
+            QByteArray(reinterpret_cast<const char*>(od_wire.data()),
+                       static_cast<int>(od_wire.size())));
 
-            old_device_approved_ = true;
-            od_approve_btn_->setEnabled(false);
-            approving_od_label_->setText(
-                "Approval sent.\n"
-                "Waiting for the new device…");
-            updateStatus("Waiting for the new device to approve");
-        } catch (const std::exception& e) {
-            showError(QString("OD approval failed: %1").arg(e.what()));
-        }
-    } else {
-        if (!nd_auth_.valid()) {
-            showError("Waiting for Old Device to approve first");
-            return;
-        }
-        try {
-            if (!tpm_) {
-                showError("TPM backend unavailable");
-                return;
-            }
-            tpm_->createKey();
-            std::vector<uint8_t> nd_pk = tpm_->getPubkey();
-
-            std::vector<uint8_t> nd_digest =
-                newDeviceApprovalDigest(sas_code_, pk_nd_, id_);
-            std::vector<uint8_t> nd_sigma = tpm_->sign(nd_digest);
-
-            auth::sync::NdApproval nd_approval;
-            nd_approval.device_public_key = std::move(nd_pk);
-            nd_approval.signature = std::move(nd_sigma);
-            auto nd_wire = serializeNdApproval(nd_approval);
-            sendPlainFrame(2,
-                QByteArray(reinterpret_cast<const char*>(nd_wire.data()),
-                           static_cast<int>(nd_wire.size())));
-
-            auto kem_result = kemEncapsulate(pk_nd_, nd_auth_);
-            std::vector<uint8_t> kem_ct = std::move(kem_result.first);
-            std::array<uint8_t, 32> shared_secret = kem_result.second;
-            noise_key_ = std::vector<uint8_t>(shared_secret.begin(),
-                                              shared_secret.end());
-
-            sendPlainFrame(3,
-                QByteArray(reinterpret_cast<const char*>(kem_ct.data()),
-                           static_cast<int>(kem_ct.size())));
-
-            new_device_approved_ = true;
-            nd_approve_btn_->setEnabled(false);
-            switchScreen(Transferring);
-            updateStatus("Waiting for the vault…");
-        } catch (const std::exception& e) {
-            showError(QString("ND approval failed: %1").arg(e.what()));
-        }
+        old_device_approved_ = true;
+        od_approve_btn_->setEnabled(false);
+        approving_od_label_->setText(
+            "Approval sent.\n"
+            "Waiting for the new device…");
+        updateStatus("Waiting for the new device to approve");
+    } catch (const std::exception& e) {
+        showError(QString("OD approval failed: %1").arg(e.what()));
+        wipeSession();
     }
 }
 

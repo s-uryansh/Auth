@@ -114,9 +114,23 @@ flowchart TD
 
 ### QR Sync status
 
-QR Sync asks which device is being used. The current requested UI opens a camera scanner on **New Device** and shows a pairing QR on **Old Device**. This reverses Protocol 4's QR direction in `TMPS_Auth.pdf`, where the new device displays a QR and the old device scans it. The mismatch is recorded in `DECISIONS.md`.
+QR Sync implements Protocol 4 (VaultSync) from `TMPS_Auth.pdf` end to end on one
+machine via loopback and is wired for two devices on a LAN. The **Old Device** shows a
+pairing QR containing its one-time ML-KEM-768 public key; the **New Device** scans it
+with the camera, connects, and both compare the Short Authentication String. The user
+approves on the Old Device only.
 
-Pairing codes expire after five minutes. The Qt application uses Qt Multimedia for camera frames and ZXing-C++ to decode QR codes. Secure peer transport, mutual approval, and vault import are not yet integrated; the UI must not report a successful sync until those Protocol 4 phases are implemented.
+Device signing uses a software ECDSA P-256 signer. TPM 2.0 and Android Keystore code
+exists in the project but is not instantiated or called at runtime; no PIN prompt or
+hardware access occurs. Pairing codes expire after five minutes and each session is
+single-use: the vault is released exactly once per verified approval, and a failed
+import never reports success. Verified peer keys are stored in the encrypted trusted-
+device list inside each vault for later recognition and revocation.
+
+All Protocol 4 authorization gates remain enforced: ML-KEM-768 key encapsulation, SAS
+visual comparison, OD explicit approval, signature verification on both sides before
+vault release, and single-use session consumption. Camera access and two physical-
+device pairing still require validation on real hardware.
 
 ### Android APK build
 
@@ -159,7 +173,7 @@ flowchart TD
 
 ## Build requirements
 
-Desktop builds require CMake 3.20 or newer, a C++17 compiler, Git, vcpkg and the manifest dependencies (including ZXing-C++), Qt 6 Core/Gui/Widgets/Multimedia and its Qt Svg CMake dependency, and the host GTest package. Android packaging also needs a Qt Android arm64 kit with those Qt modules, the Qt host deployment tool, a JDK with both `java` and `javac`, an Android NDK, and an SDK with API 30 or newer plus Android build-tools. The Qt kit provides the Gradle wrapper; its user cache must be writable. System-wide Gradle and `adb` are not used by these targets.
+Desktop builds require CMake 3.20 or newer, a C++17 compiler, Git, vcpkg and the manifest dependencies (including ZXing-C++), Qt 6 Core/Gui/Widgets/Multimedia and its Qt Svg CMake dependency, and the host GTest package. Hardware TPM device signing additionally requires the system `libtss2-dev` package; when it is absent the build still succeeds with a fail-closed stub and QR pairing reports that no hardware signer is available. Android packaging also needs a Qt Android arm64 kit with those Qt modules, the Qt host deployment tool, a JDK with both `java` and `javac`, an Android NDK, and an SDK with API 30 or newer plus Android build-tools. The Qt kit provides the Gradle wrapper; its user cache must be writable. System-wide Gradle and `adb` are not used by these targets.
 
 `make setup` currently supports Ubuntu and Debian through `apt-get`. It does not install Qt because Qt requires the account-based installer and kit selection described above. Android SDK command-line tools are also a separate Google download; once installed, setup uses `sdkmanager` to install API 35, build-tools 35.0.0, and NDK 27.2.12479018. Android SDK licenses are shown interactively for you to review and accept.
 

@@ -23,6 +23,8 @@ set(AUTH_QT_SOURCES
   ui/main.cpp ui/AuthTab.cpp ui/AuthTab.h ui/MainWindow.cpp ui/MainWindow.h
   ui/PasswordManagerTab.cpp ui/PasswordManagerTab.h
   ui/QRSyncTab.cpp ui/QRSyncTab.h
+  ui/DeviceSigner.cpp ui/DeviceSigner.h
+  ui/AndroidKeystoreTpm.cpp ui/AndroidKeystoreTpm.h
   ui/PasswordVaultWorkflow.cpp ui/PasswordVaultWorkflow.h
   ui/SensitiveData.cpp ui/SensitiveData.h
   ui/PasswordVaultFileStore.cpp ui/PasswordVaultFileStore.h)
@@ -54,6 +56,27 @@ else()
   list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed/x64-linux")
   find_package(GTest CONFIG REQUIRED)
   find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Multimedia Concurrent Network)
+
+  # Protocol 4 requires a hardware-backed device signer. Detect the tpm2-tss
+  # ESAPI development files; without them desktop builds compile the
+  # fail-closed stub and pairing stays disabled at runtime.
+  find_path(TSS2_ESYS_INCLUDE_DIR tss2/tss2_esys.h)
+  find_library(TSS2_ESYS_LIB tss2-esys)
+  find_library(TSS2_TCTILDR_LIB tss2-tctildr)
+  if(TSS2_ESYS_INCLUDE_DIR AND TSS2_ESYS_LIB AND TSS2_TCTILDR_LIB)
+    set(HAVE_TPM2_TSS ON)
+    message(STATUS "tpm2-tss found: hardware TPM 2.0 device signing enabled")
+  else()
+    set(HAVE_TPM2_TSS OFF)
+    message(STATUS "tpm2-tss not found: compiling the TPM stub (install libtss2-dev to enable hardware pairing)")
+  endif()
+  function(auth_link_tpm2 target)
+    if(HAVE_TPM2_TSS)
+      target_compile_definitions(${target} PRIVATE HAVE_TPM2_TSS=1)
+      target_include_directories(${target} PRIVATE ${TSS2_ESYS_INCLUDE_DIR})
+      target_link_libraries(${target} PRIVATE ${TSS2_ESYS_LIB} ${TSS2_TCTILDR_LIB})
+    endif()
+  endfunction()
 
   set(SANITIZER_FLAGS -fsanitize=address -fno-omit-frame-pointer)
   add_executable(AuthUI src/main.cpp)
@@ -115,6 +138,7 @@ else()
 
   add_executable(QtUiFlowTests
     tests/test_qrsync_camera_flow.cpp
+    tests/test_qrsync_integration.cpp
     tests/test_auth_ui.cpp
     ui/AuthTab.cpp
     ui/AuthTab.h
@@ -122,6 +146,8 @@ else()
     ui/MainWindow.h
     ui/QRSyncTab.cpp
     ui/QRSyncTab.h
+    ui/DeviceSigner.cpp
+    ui/AndroidKeystoreTpm.cpp
     ui/PasswordManagerTab.cpp
     ui/PasswordManagerTab.h
     ui/PasswordVaultWorkflow.cpp
@@ -134,18 +160,24 @@ else()
     AuthLib Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Multimedia
     Qt6::Concurrent Qt6::Network OQS::oqs ZXing::ZXing GTest::gtest_main)
   target_compile_options(QtUiFlowTests PRIVATE ${STRICT_CXX_FLAGS})
+  auth_link_tpm2(QtUiFlowTests)
   add_test(NAME QtUiFlowTests COMMAND QtUiFlowTests)
   set_tests_properties(QtUiFlowTests PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2;LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp")
 
-  add_executable(SyncTpmTests tests/test_sync_tpm.cpp)
+  add_executable(SyncTpmTests
+    tests/test_sync_tpm.cpp
+    tests/test_ecdsa_wire.cpp)
   target_include_directories(SyncTpmTests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(SyncTpmTests PRIVATE
     OQS::oqs OpenSSL::Crypto GTest::gtest_main)
   target_compile_options(SyncTpmTests PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
   target_link_options(SyncTpmTests PRIVATE ${SANITIZER_FLAGS})
+  auth_link_tpm2(SyncTpmTests)
   add_test(NAME SyncTpmTests COMMAND SyncTpmTests)
+  set_tests_properties(SyncTpmTests PROPERTIES
+    ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp")
 
   add_executable(QRSyncProtocolUnitTests tests/test_qrsync_protocol_unit.cpp)
   target_include_directories(QRSyncProtocolUnitTests PRIVATE
@@ -171,20 +203,6 @@ else()
   target_link_options(SyncTrustStoreTests PRIVATE ${SANITIZER_FLAGS})
   add_test(NAME SyncTrustStoreTests COMMAND SyncTrustStoreTests)
 
-  add_executable(QRSyncIntegrationTests
-    tests/test_qrsync_integration.cpp
-    ui/PasswordVaultWorkflow.cpp
-    ui/PasswordVaultFileStore.cpp
-    ui/SensitiveData.cpp)
-  target_include_directories(QRSyncIntegrationTests PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/ui)
-  target_link_libraries(QRSyncIntegrationTests PRIVATE
-    AuthLib OQS::oqs Qt6::Core GTest::gtest_main)
-  target_compile_options(QRSyncIntegrationTests PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
-  target_link_options(QRSyncIntegrationTests PRIVATE ${SANITIZER_FLAGS})
-  add_test(NAME QRSyncIntegrationTests COMMAND QRSyncIntegrationTests)
-
   add_custom_target(LSanCheck
     COMMAND ${CMAKE_COMMAND} -E env "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/lsan.supp" ${CMAKE_BINARY_DIR}/AuthUI
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -195,13 +213,7 @@ else()
   target_link_libraries(AuthQt PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Concurrent Qt6::Network
     AuthLib OQS::oqs ZXing::ZXing)
 target_include_directories(AuthQt PRIVATE /home/s-uryansh/Qt/6.12.0/gcc_64/include)
-  if(HAVE_TPM2_TSS)
-    find_library(TSS2_ESYS_LIB tss2-esys)
-    find_library(TSS2_TCTILDR_LIB tss2-tctildr)
-    if(TSS2_ESYS_LIB AND TSS2_TCTILDR_LIB)
-      target_link_libraries(AuthQt PRIVATE ${TSS2_ESYS_LIB} ${TSS2_TCTILDR_LIB})
-    endif()
-  endif()
+  auth_link_tpm2(AuthQt)
   target_compile_options(AuthQt PRIVATE ${STRICT_CXX_FLAGS} ${SANITIZER_FLAGS})
   target_link_options(AuthQt PRIVATE ${SANITIZER_FLAGS})
 endif()

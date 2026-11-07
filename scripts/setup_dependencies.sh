@@ -32,6 +32,7 @@ say 'Installing system build tools and a full JDK (sudo may prompt for your pass
 sudo apt-get update
 sudo apt-get install -y \
     build-essential cmake curl git ninja-build pkg-config unzip zip tar \
+    libtss2-dev \
     openjdk-17-jdk-headless libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0
 
 if [[ ! -d "$VCPKG_ROOT/.git" ]]; then

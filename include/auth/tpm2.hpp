@@ -1,18 +1,25 @@
 // TPM 2.0 signing support via tpm2-tss ESAPI.
-// Compiled only when HAVE_TPM2_TSS is defined (requires libtss2-esys-dev headers).
-// When TPM is unavailable, QRSyncTab falls back to SoftwareTpm.
+// Compiled only when HAVE_TPM2_TSS is defined (requires libtss2-esys-dev
+// headers). When no TPM can be reached the signer reports hasTPM() ==
+// false and the app keeps QR pairing disabled.
 //
 // Protocol 4 (TMPS_Auth.pdf Section IV-C): each device holds a TPM-resident
 // signing key (skdev, pkdev). skdev never leaves the TPM; signing requires
-// user authorization (PIN/biometric). The public key pkdev serves as the
-// device identity and is exchanged during QR sync.
-
+// the user's authorization value. pkdev serves as the device identity and
+// is exchanged during QR sync. The key here is an Endorsement-hierarchy
+// primary key: with a fixed template (and PIN) it deterministically derives
+// the same identity in every run without the private part ever leaving the
+// chip.
 #pragma once
 
+#include "auth/ecdsa_wire.hpp"
 #include "auth/sync_tpm.hpp"
 
-#include <array>
+#include <openssl/evp.h>
+#include <openssl/crypto.h>
+
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -38,6 +45,13 @@ public:
   Tpm2Tpm& operator=(Tpm2Tpm&&) = delete;
 
   bool hasTPM() const noexcept override { return esys_ctx_ != nullptr; }
+  // The user PIN authorizing use of skdev; set before createKey() and
+  // required for every signature. Changing it changes the derived identity.
+  bool setAuthorization(const std::vector<uint8_t>& pin) override {
+      auth_value_ = pin;
+      return true;
+  }
+  bool isHardwareBacked() const noexcept override { return true; }
   void createKey() override;
   std::vector<uint8_t> sign(const std::vector<uint8_t>& message) override;
   bool verify(const std::vector<uint8_t>& message,
@@ -54,9 +68,9 @@ private:
   ESYS_CONTEXT* esys_ctx_ = nullptr;
   ESYS_TR key_handle_ = ESYS_TR_NONE;
   std::vector<uint8_t> pubkey_;
+  std::vector<uint8_t> auth_value_;
 
   void initEsysContext();
-  void createSigningKey();
   void exportPublicKey();
   std::vector<uint8_t> sha256Digest(const std::vector<uint8_t>& data) const;
 };
@@ -69,13 +83,28 @@ inline Tpm2Tpm::~Tpm2Tpm() {
 }
 
 inline void Tpm2Tpm::initEsysContext() {
-  TSS2_TCTI_CONTEXT* tcti = nullptr;
-  TSS2_RC rc = Tss2_TctiLdr_Initialize("device:/dev/tpm0", &tcti);
-  if (rc != TSS2_RC_SUCCESS)
-    rc = Tss2_TctiLdr_Initialize("mssim:127.0.0.1:2321", &tcti);
-  if (rc != TSS2_RC_SUCCESS || !tcti) { esys_ctx_ = nullptr; return; }
-  if (Esys_Initialize(&esys_ctx_, tcti, nullptr) != TSS2_RC_SUCCESS) {
+  // The kernel resource manager is preferred (it multiplexes TPM access);
+  // then direct device access. The mssim probe is opt-in via the
+  // AUTH_TPM_SIMULATOR environment variable because the tss2-tcti loader
+  // leaks a partially initialised context when no simulator is listening.
+  std::vector<const char*> candidates = {
+      "device:/dev/tpmrm0",
+      "device:/dev/tpm0",
+  };
+  if (const char* simulator = std::getenv("AUTH_TPM_SIMULATOR");
+      simulator && *simulator) {
+    candidates.push_back("mssim:127.0.0.1:2321");
+  }
+  for (const char* candidate : candidates) {
+    TSS2_TCTI_CONTEXT* tcti = nullptr;
+    if (Tss2_TctiLdr_Initialize(candidate, &tcti) != TSS2_RC_SUCCESS || !tcti)
+      continue;
+    if (Esys_Initialize(&esys_ctx_, tcti, nullptr) == TSS2_RC_SUCCESS &&
+        esys_ctx_) {
+      return;
+    }
     esys_ctx_ = nullptr;
+    Tss2_TctiLdr_Finalize(&tcti);
   }
 }
 
@@ -97,18 +126,40 @@ inline void Tpm2Tpm::createKey() {
   inPublic.publicArea.parameters.eccDetail.kdf.scheme = TPM2_ALG_NULL;
 
   TPM2B_SENSITIVE_CREATE inSensitive = {};
-  inSensitive.sensitive.userAuth.size = 0;
+  const uint16_t auth_size =
+      static_cast<uint16_t>(auth_value_.size() > sizeof(inSensitive.sensitive.userAuth.buffer)
+                                ? sizeof(inSensitive.sensitive.userAuth.buffer)
+                                : auth_value_.size());
+  inSensitive.sensitive.userAuth.size = auth_size;
+  if (auth_size > 0) {
+    std::memcpy(inSensitive.sensitive.userAuth.buffer, auth_value_.data(), auth_size);
+  }
   inSensitive.sensitive.data.size = 0;
 
-  TPM2B_PUBLIC* out_public = nullptr;
-  TSS2_RC rc = Esys_CreatePrimary(esys_ctx_,
-                                  ESYS_TR_RH_OWNER,
-                                  ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
-                                  &inSensitive, &inPublic,
-                                  nullptr, nullptr,
-                                  &key_handle_, &out_public,
-                                  nullptr, nullptr, nullptr);
-  if (rc != TSS2_RC_SUCCESS) throw std::runtime_error("Esys_CreatePrimary failed");
+  // Deterministic device identity that requires no persistent-handle
+  // provisioning. Try the Endorsement hierarchy first (stable across TPM
+  // clears), then fall back to the Owner hierarchy — some TPMs require
+  // authorization on EPS, so the working hierarchy becomes the identity root.
+  // Either hierarchy yields a stable key for a given (template, auth_value).
+  ESYS_TR hierarchies[] = {ESYS_TR_RH_ENDORSEMENT, ESYS_TR_RH_OWNER};
+  TSS2_RC rc = TSS2_RC_SUCCESS;
+  bool created = false;
+  for (ESYS_TR hier : hierarchies) {
+    rc = Esys_CreatePrimary(esys_ctx_, hier,
+                            ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
+                            &inSensitive, &inPublic,
+                            nullptr, nullptr,
+                            &key_handle_, nullptr,
+                            nullptr, nullptr, nullptr);
+    if (rc == TSS2_RC_SUCCESS) {
+      created = true;
+      break;
+    }
+  }
+  if (!created) {
+    throw std::runtime_error("could not create the device key on the TPM "
+                             "(check the PIN: the identity depends on it)");
+  }
 
   exportPublicKey();
 }
@@ -118,6 +169,14 @@ inline std::vector<uint8_t> Tpm2Tpm::sign(
   if (!esys_ctx_) throw std::runtime_error("TPM context not initialized");
   if (key_handle_ == ESYS_TR_NONE)
     throw std::runtime_error("TPM signing key not created");
+
+  if (!auth_value_.empty()) {
+    TPM2B_AUTH auth = {};
+    auth.size = static_cast<uint16_t>(auth_value_.size());
+    std::memcpy(auth.buffer, auth_value_.data(), auth_value_.size());
+    if (Esys_TR_SetAuth(esys_ctx_, key_handle_, &auth) != TSS2_RC_SUCCESS)
+      throw std::runtime_error("Esys_TR_SetAuth failed");
+  }
 
   auto digest = sha256Digest(message);
   TPM2B_DIGEST tpm_digest = {};
@@ -131,28 +190,27 @@ inline std::vector<uint8_t> Tpm2Tpm::sign(
   TPMT_SIGNATURE* signature = nullptr;
   TSS2_RC rc = Esys_Sign(esys_ctx_,
                          key_handle_,
-                         ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
+                         ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
                          &tpm_digest,
                          &scheme,
                          nullptr,
                          &signature);
-  if (rc != TSS2_RC_SUCCESS || !signature)
-    throw std::runtime_error("Esys_Sign failed");
-
-  std::vector<uint8_t> result;
-  if (signature->signature.ecdsa.signatureR.size > 0 &&
-      signature->signature.ecdsa.signatureS.size > 0) {
-    result.reserve(signature->signature.ecdsa.signatureR.size +
-                   signature->signature.ecdsa.signatureS.size);
-    result.insert(result.end(),
-                  signature->signature.ecdsa.signatureR.buffer,
-                  signature->signature.ecdsa.signatureR.buffer +
-                      signature->signature.ecdsa.signatureR.size);
-    result.insert(result.end(),
-                  signature->signature.ecdsa.signatureS.buffer,
-                  signature->signature.ecdsa.signatureS.buffer +
-                      signature->signature.ecdsa.signatureS.size);
+  if (rc != TSS2_RC_SUCCESS || !signature) {
+    if (signature) Esys_Free(signature);
+    throw std::runtime_error("Esys_Sign failed (wrong PIN or locked key)");
   }
+
+  // Normalise to the fixed 64-byte wire form: r(32) || s(32), zero-padded.
+  std::vector<uint8_t> result(64, 0);
+  const auto& r = signature->signature.ecdsa.signatureR;
+  const auto& s = signature->signature.ecdsa.signatureS;
+  if (r.size > 32 || s.size > 32) {
+    Esys_Free(signature);
+    throw std::runtime_error("TPM returned an oversized ECDSA signature");
+  }
+  std::memcpy(result.data() + 32 - r.size, r.buffer, r.size);
+  std::memcpy(result.data() + 64 - s.size, s.buffer, s.size);
+  Esys_Free(signature);
   return result;
 }
 
@@ -160,27 +218,9 @@ inline bool Tpm2Tpm::verify(
     const std::vector<uint8_t>& message,
     const std::vector<uint8_t>& signature,
     const std::vector<uint8_t>& public_key) {
-  // Verify outside TPM using OpenSSL with exported public key
-  // Build EC public key from uncompressed point: 0x04 || x(32) || y(32)
-  if (public_key.size() != 65 || public_key[0] != 0x04) return false;
-
-  EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_EC, nullptr,
-                                               public_key.data() + 1, 64);
-  if (!pkey) return false;
-
-  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-  if (!ctx) { EVP_PKEY_free(pkey); return false; }
-
-  bool ok = false;
-  if (EVP_DigestVerifyInit_ex(ctx, nullptr, "SHA256", nullptr, nullptr, pkey, nullptr) == 1 &&
-      EVP_DigestVerifyUpdate(ctx, message.data(), message.size()) == 1 &&
-      EVP_DigestVerifyFinal(ctx, signature.data(), signature.size()) == 1) {
-    ok = true;
-  }
-
-  EVP_MD_CTX_free(ctx);
-  EVP_PKEY_free(pkey);
-  return ok;
+  // Common wire format shared with the Android keystore backend: raw
+  // 64-byte r||s signature verified over a 65-byte uncompressed P-256 point.
+  return auth::sync::ecdsaVerifySha256(message, signature, public_key);
 }
 
 inline std::vector<uint8_t> Tpm2Tpm::getPubkey() const { return pubkey_; }
@@ -189,6 +229,10 @@ inline void Tpm2Tpm::wipe() {
   if (key_handle_ != ESYS_TR_NONE && esys_ctx_) {
     Esys_FlushContext(esys_ctx_, key_handle_);
     key_handle_ = ESYS_TR_NONE;
+  }
+  if (!auth_value_.empty()) {
+    OPENSSL_cleanse(auth_value_.data(), auth_value_.size());
+    auth_value_.clear();
   }
   pubkey_.clear();
   pubkey_.shrink_to_fit();
@@ -205,14 +249,19 @@ inline void Tpm2Tpm::exportPublicKey() {
   }
   if (!out_public) return;
 
-  // Extract uncompressed ECC point: 0x04 || x(32) || y(32)
-  pubkey_.clear();
-  pubkey_.push_back(0x04);
-  // publicArea.unique.ecc is TPMS_ECC_POINT with x and y (TPM2B_ECC_PARAMETER)
+  // Uncompressed SEC1 point 0x04 || x(32) || y(32), zero-padded to the
+  // fixed wire width.
   const auto& x = out_public->publicArea.unique.ecc.x;
   const auto& y = out_public->publicArea.unique.ecc.y;
-  pubkey_.insert(pubkey_.end(), x.buffer, x.buffer + x.size);
-  pubkey_.insert(pubkey_.end(), y.buffer, y.buffer + y.size);
+  if (x.size <= 32 && y.size <= 32) {
+    pubkey_.assign(65, 0);
+    pubkey_[0] = 0x04;
+    std::memcpy(pubkey_.data() + 1 + 32 - x.size, x.buffer, x.size);
+    std::memcpy(pubkey_.data() + 33 + 32 - y.size, y.buffer, y.size);
+  } else {
+    pubkey_.clear();
+  }
+  Esys_Free(out_public);
 }
 
 inline std::vector<uint8_t> Tpm2Tpm::sha256Digest(
@@ -234,6 +283,7 @@ public:
   ~Tpm2Tpm() override = default;
 
   bool hasTPM() const noexcept override { return false; }
+  bool isHardwareBacked() const noexcept override { return false; }
   void createKey() override { throw std::runtime_error("TPM2 not available"); }
   std::vector<uint8_t> sign(const std::vector<uint8_t>&) override {
     throw std::runtime_error("TPM2 not available");

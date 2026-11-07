@@ -98,6 +98,7 @@ PasswordManagerTab::PasswordManagerTab(QWidget *parent)
       status_label_(new QLabel("", this)),
       session_timer_(new QTimer(this)) {
     setWindowTitle("Password Manager");
+    master_pass_input_->setObjectName("masterPasswordInput");
     master_pass_input_->setEchoMode(QLineEdit::Password);
 
     auto *setup_layout = new QVBoxLayout(setup_page_);
@@ -322,7 +323,9 @@ bool PasswordManagerTab::exportVaultEntriesForSync(
         error = "Set up a password vault before syncing from this device";
         return false;
     }
-    if (!viewing_unlocked_ && !unlockForViewing()) {
+    // Same rule as the flow chart: reuse the operation key when one is
+    // already in memory; only prompt when nothing has unlocked the vault.
+    if (!viewing_unlocked_ && active_key_.empty() && !unlockForViewing()) {
         error = "Unlocking the source vault was cancelled or failed";
         return false;
     }
@@ -347,7 +350,9 @@ bool PasswordManagerTab::importVaultEntriesFromSync(
     }
     if (!store_->exists() && !createVaultForSync(error))
         return false;
-    if (!viewing_unlocked_ && !unlockForViewing()) {
+    // Reuse an already-derived key (e.g. right after vault setup); prompt
+    // only when nothing has unlocked the vault in this session yet.
+    if (!viewing_unlocked_ && active_key_.empty() && !unlockForViewing()) {
         error = "Unlocking this device's vault was cancelled or failed";
         return false;
     }
@@ -368,6 +373,34 @@ bool PasswordManagerTab::importVaultEntriesFromSync(
         error = QString::fromUtf8(e.what());
         return false;
     }
+}
+
+bool PasswordManagerTab::recordTrustedDeviceKey(
+    const std::vector<uint8_t> &device_key, QString &error) {
+    if (device_key.empty()) {
+        error = "Peer device key is empty";
+        return false;
+    }
+    if (!workflow_ || active_key_.empty()) {
+        error = "The vault must be unlocked to record a trusted device";
+        return false;
+    }
+    try {
+        workflow_->addTrustedDevice(active_key_, device_key);
+    } catch (const std::exception &e) {
+        error = QString::fromUtf8(e.what());
+        return false;
+    }
+    return true;
+}
+
+bool PasswordManagerTab::isKnownPeerDeviceKey(
+    const std::vector<uint8_t> &device_key, QString &error) const {
+    if (!workflow_ || active_key_.empty()) {
+        error = "The vault must be unlocked to check trusted devices";
+        return false;
+    }
+    return workflow_->isDeviceTrusted(active_key_, device_key);
 }
 
 void PasswordManagerTab::onAddClicked() {
