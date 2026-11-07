@@ -52,11 +52,65 @@ After a successful target finishes, Make verifies its expected build artifacts a
 
 Accounts are kept in memory for the current app run. Registration validates input and credentials before creating a record. Only a successful login unlocks the gated application features.
 
+```mermaid
+flowchart TD
+    A[Enter username and password] --> B{Register or login?}
+    B -->|Register| C{Both fields present?}
+    C -->|No| D[Show input error]
+    C -->|Yes| E{Username already registered?}
+    E -->|Yes| F[Reject duplicate username]
+    E -->|No| G{Password meets policy?}
+    G -->|No| H[Reject password]
+    G -->|Yes| I[Generate nonce salt and secret]
+    I --> J[Create encrypted registration record]
+    J --> K[Store salt and account record in memory]
+    K --> L[Clear password input]
+    B -->|Login| M{Fields present and user registered?}
+    M -->|No| N[Show login error]
+    M -->|Yes| O[Hash password with local salt]
+    O --> P[Verify encrypted server record]
+    P --> Q[Clear password and hash buffers]
+    Q --> R{Authentication succeeded?}
+    R -->|No| S[Keep gated features hidden]
+    R -->|Yes| T[Show authenticated application features]
+```
+
 Registration passwords need at least eight Unicode code points, an ASCII uppercase letter, an ASCII lowercase letter, a digit, and an ASCII punctuation character.
 
 ### Password Manager
 
 The website index remains searchable while the vault is locked. Credential contents are encrypted in the vault file.
+
+```mermaid
+flowchart TD
+    A[Open Password Manager] --> B{Vault file exists?}
+    B -->|No| C[Set master password]
+    C --> D[Generate vault salt and derive key]
+    D --> E[Encrypt empty vault and save file]
+    E --> F[Show Add Credential]
+    B -->|Yes| G[Load vault metadata and website index]
+    G --> H[Show searchable website list while locked]
+    H --> I{Choose action}
+    I -->|Search| H
+    I -->|Add credential| J{Key available for this operation?}
+    J -->|No| K[Request master password]
+    K --> L[Derive key and decrypt vault]
+    L -->|Wrong password or damaged file| M[Keep vault locked and report error]
+    L -->|Success| N[Validate URL and save encrypted credential]
+    J -->|Yes| N
+    I -->|Select website| O{Viewing session unlocked?}
+    O -->|No| P[Request master password]
+    P --> Q[Derive key and decrypt entries]
+    Q -->|Failure| M
+    Q -->|Success| R[Start ten-minute reveal session]
+    O -->|Yes| S[Show credentials for selected website]
+    R --> S
+    S --> T[Copy username or password or open website]
+    S --> U{Ten minutes elapsed?}
+    U -->|No| S
+    U -->|Yes| V[Clear credential views entries and key]
+    V --> H
+```
 
 ### QR Sync status
 
