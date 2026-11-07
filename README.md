@@ -52,65 +52,11 @@ After a successful target finishes, Make verifies its expected build artifacts a
 
 Accounts are kept in memory for the current app run. Registration validates input and credentials before creating a record. Only a successful login unlocks the gated application features.
 
-```mermaid
-flowchart TD
-    A[Enter username and password] --> B{Register or login?}
-    B -->|Register| C{Both fields present?}
-    C -->|No| E[Show input error]
-    C -->|Yes| D{Username already registered?}
-    D -->|Yes| F[Reject duplicate username]
-    D -->|No| G{Password meets policy?}
-    G -->|No| H[Reject password]
-    G -->|Yes| I[Generate nonce, salt, and secret]
-    I --> J[Create encrypted registration record]
-    J --> K[Store salt and account record in memory]
-    K --> L[Clear password input]
-    B -->|Login| M{Fields present and user registered?}
-    M -->|No| N[Show login error]
-    M -->|Yes| O[Hash password with local salt]
-    O --> P[Verify encrypted server record]
-    P --> Q[Clear password and hash buffers]
-    Q --> R{Authentication succeeded?}
-    R -->|No| S[Keep gated features hidden]
-    R -->|Yes| T[Show authenticated application features]
-```
-
 Registration passwords need at least eight Unicode code points, an ASCII uppercase letter, an ASCII lowercase letter, a digit, and an ASCII punctuation character.
 
 ### Password Manager
 
 The website index remains searchable while the vault is locked. Credential contents are encrypted in the vault file.
-
-```mermaid
-flowchart TD
-    A[Open Password Manager] --> B{Vault file exists?}
-    B -->|No| C[Set master password]
-    C --> D[Generate vault salt and derive key]
-    D --> E[Encrypt empty vault and save file]
-    E --> F[Show Add Credential]
-    B -->|Yes| G[Load vault metadata and website index]
-    G --> H[Show searchable website list while locked]
-    H --> I{Choose action}
-    I -->|Search| H
-    I -->|Add credential| J{Key available for this operation?}
-    J -->|No| K[Request master password]
-    K --> L[Derive key and decrypt vault]
-    L -->|Wrong password or damaged file| M[Keep vault locked and report error]
-    L -->|Success| N[Validate URL and save encrypted credential]
-    J -->|Yes| N
-    I -->|Select website| O{Viewing session unlocked?}
-    O -->|No| P[Request master password]
-    P --> Q[Derive key and decrypt entries]
-    Q -->|Failure| M
-    Q -->|Success| R[Start ten-minute reveal session]
-    O -->|Yes| S[Show credentials for selected website]
-    R --> S
-    S --> T[Copy username or password, or open website]
-    S --> U{Ten minutes elapsed?}
-    U -->|No| S
-    U -->|Yes| V[Clear credential views, entries, and key]
-    V --> H
-```
 
 ### QR Sync status
 
@@ -119,6 +65,22 @@ machine via loopback and is wired for two devices on a LAN. The **Old Device** s
 pairing QR containing its one-time ML-KEM-768 public key; the **New Device** scans it
 with the camera, connects, and both compare the Short Authentication String. The user
 approves on the Old Device only.
+
+```mermaid
+flowchart TD
+    A[OD: Generate ML-KEM-768 keypair] --> B[OD: Show QR code with PKn]
+    B --> C[ND: Scan QR code]
+    C --> D[ND: Connect to OD via TCP]
+    D --> E[Both: Compute SAS = H(PKn || ID)]
+    E --> F[User: Compare SAS codes]
+    F --> G[OD: User approves]
+    G --> H[OD: Sign sigma_OD]
+    H --> I[ND: Verify sigma_OD]
+    I --> J[ND: Sign sigma_ND + encapsulate ML-KEM-768]
+    J --> K[OD: Verify sigma_ND]
+    K --> L[OD: Decapsulate + send vault]
+    L --> M[ND: Decrypt + merge vault]
+```
 
 Device signing uses a software ECDSA P-256 signer. TPM 2.0 and Android Keystore code
 exists in the project but is not instantiated or called at runtime; no PIN prompt or
@@ -132,44 +94,9 @@ visual comparison, OD explicit approval, signature verification on both sides be
 vault release, and single-use session consumption. Camera access and two physical-
 device pairing still require validation on real hardware.
 
-### Android APK build
-
-`make android` checks Android packaging prerequisites, configures the arm64-v8a build, and asks Qt and Gradle to produce the debug APK. The default `make` target checks both desktop and Android requirements, then builds desktop followed by Android.
-
-```mermaid
-flowchart TD
-    A[make android] --> B[Check Android prerequisites]
-    B -->|Missing or misconfigured| C[Print all failed checks and stop]
-    B -->|All pass| D[Configure CMake with Android NDK and Qt kit]
-    D --> E[Build AuthQt for arm64-v8a]
-    E --> F[Qt prepares Android package]
-    F --> G[Gradle assembles debug APK]
-    G --> H[Write android-build-debug.apk]
-```
-
 ### Make target routing
 
 Each target runs only the prerequisite checks needed for its work. `help` and cleanup targets stay available even when a build toolchain is missing.
-
-```mermaid
-flowchart TD
-    A[Run make target] --> B{Target}
-    B -->|build, ui, demo| C[Check desktop prerequisites]
-    C -->|Failed| X[Report all missing items and stop]
-    C -->|Passed| D[Configure and build desktop]
-    D -->|ui target| E[Launch Qt application]
-    D -->|demo target| F[Run console demo]
-    B -->|test| G[Check desktop and CTest prerequisites]
-    G -->|Failed| X
-    G -->|Passed| H[Build desktop and run CTest suites]
-    B -->|android| I[Check Android packaging prerequisites]
-    I -->|Failed| X
-    I -->|Passed| J[Configure and package Android APK]
-    B -->|all| K[Check desktop and Android prerequisites]
-    K -->|Failed| X
-    K -->|Passed| L[Build desktop, then Android APK]
-    B -->|help, clean, android-clean| M[Run help or cleanup directly]
-```
 
 ## Build requirements
 
